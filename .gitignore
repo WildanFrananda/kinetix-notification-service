@@ -1,0 +1,15 @@
+target/
+project/target/
+project/project/
+.bsp/
+.metals/
+.bloop/
+.scala-build/
+
+# Generated from the contract at build time, never committed: a copy here would be a second place
+# the same wire type is defined. Fetch it with bin/sync-contracts.
+.contracts/
+
+.env
+*.log
+.DS_Store

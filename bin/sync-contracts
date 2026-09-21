@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+# Fetches the wire contracts this service compiles against.
+#
+# Scala has no kinetix-contracts package: buf publishes TypeScript, Python, C#, Java, Ruby, PHP and
+# Go, and there is no remote plugin for fs2-grpc. So this service does what pricing and matching do
+# — generate from .proto at build time — but from the contract repository at a pinned tag rather
+# than from a copy committed here. `.contracts/` is gitignored, so `git ls-files '*.proto'` stays
+# empty and the S9 exit criterion holds.
+#
+# Pinned to a commit, not just a tag: a tag can be moved, and a moved tag silently changes what this
+# service speaks. The tag is what a reader looks up; the commit is what is verified.
+set -eu
+
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="https://github.com/WildanFrananda/kinetix-contracts.git"
+TAG="v1.0.16"
+COMMIT="323d37aa72d170fdffba5d73e3d386ba18a0f2d3"
+DEST="$HERE/.contracts"
+
+if [ -d "$DEST/.git" ]; then
+  got="$(git -C "$DEST" rev-parse HEAD)"
+  if [ "$got" = "$COMMIT" ]; then
+    echo "contracts already at $TAG ($COMMIT)"
+    exit 0
+  fi
+  rm -rf "$DEST"
+fi
+
+git clone --depth 1 --branch "$TAG" --quiet "$REPO" "$DEST"
+
+got="$(git -C "$DEST" rev-parse HEAD)"
+if [ "$got" != "$COMMIT" ]; then
+  echo "$TAG resolves to $got, but this service is pinned to $COMMIT"
+  echo "either the tag was moved or the pin is stale; neither should be worked around here"
+  rm -rf "$DEST"
+  exit 1
+fi
+
+test -f "$DEST/proto/notification/v1/notification.proto" || {
+  echo "$TAG has no proto/notification/v1/notification.proto"
+  rm -rf "$DEST"
+  exit 1
+}
+
+# Only what this service speaks.
+#
+# The contract repository carries ten packages. Building all of them would put wire types for
+# payment, pricing and the fleet on this service's classpath — an invitation to reach for one — and
+# would drag in protos importing google/protobuf well-known types this build has no need to resolve.
+#
+# Narrowed here rather than in build.sbt: a setting that copies files is evaluated at a moment sbt
+# decides, and `sbt clean` then leaves the build pointing at a directory that no longer exists.
+# Doing it where the contract is fetched means the directory exists before sbt is ever started,
+# including in the Dockerfile, which runs this first.
+SPOKEN="$HERE/.contracts/spoken"
+rm -rf "$SPOKEN"
+
+for path in common/v1/common.proto identity/v1/identity.proto notification/v1/notification.proto; do
+  test -f "$DEST/proto/$path" || {
+    echo "$TAG has no proto/$path"
+    rm -rf "$DEST" "$SPOKEN"
+    exit 1
+  }
+  mkdir -p "$SPOKEN/$(dirname "$path")"
+  cp "$DEST/proto/$path" "$SPOKEN/$path"
+done
+
+echo "contracts synced at $TAG ($COMMIT); speaking common, identity, notification"

@@ -1,0 +1,61 @@
+# Kinetix notification CI — GitLab.
+#
+# ⚠ PAIRED FILE: .github/workflows/ci.yml
+# `origin` is GitHub and GitLab is a mirror. Both assert the same things and must be changed
+# together; if they drift, the two platforms disagree about whether the same commit is good.
+
+include:
+  - project: 'WildanFrananda/kinetix-infrastructure'
+    ref: main
+    file: '/ci/service-ci.yml'
+
+stages:
+  - verify
+  - build
+  - test
+
+variables:
+  SBT_OPTS: "-Xmx2G"
+
+.scala:
+  image: sbtscala/scala-sbt:eclipse-temurin-21.0.5_11_1.10.7_3.3.4
+  cache:
+    key:
+      files:
+        - build.sbt
+        - project/plugins.sbt
+    paths:
+      - .cache/coursier
+      - .cache/sbt
+  before_script:
+    - sh bin/sync-contracts
+
+secret-scan:
+  extends: .secret-scan
+
+build-image:
+  extends: .build-image
+
+compile:
+  extends: .scala
+  stage: verify
+  script:
+    # -Xfatal-warnings with -Wunused:all and -Wnonunit-statement: a build that passes here is a
+    # stronger statement than it is in most repositories.
+    - sbt -batch compile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+test:
+  extends: .scala
+  stage: test
+  script:
+    - sbt -batch test
+    # A suite that discovers nothing is a failed suite.
+    - sbt -batch "show Test/definedTests" > tests.txt
+    - grep -q 'NotifySuite' tests.txt || { echo "the suite discovered no NotifySuite"; cat tests.txt; exit 1; }
+    - sbt -batch assembly
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

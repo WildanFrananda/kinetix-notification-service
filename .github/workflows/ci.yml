@@ -1,0 +1,60 @@
+# Kinetix notification CI — GitHub.
+#
+# ⚠ PAIRED FILE: .gitlab-ci.yml
+# `origin` is GitHub and GitLab is a mirror. Both assert the same things and must be changed
+# together; if they drift, the two platforms disagree about whether the same commit is good.
+#
+# The job that matters here is `build`. This service's rules are enforced by the compiler —
+# `-Xfatal-warnings` with `-Wunused:all` and `-Wnonunit-statement` — so a build that passes is a
+# stronger statement than it is in most repositories.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      # The contracts come from the contract repository at a pinned tag. This is also the check
+      # that the pin is real: bin/sync-contracts refuses a tag that resolves to a different commit.
+      - name: Fetch the wire contracts
+        run: sh bin/sync-contracts
+
+      - name: Compile, with warnings as errors
+        run: sbt -batch compile
+
+      - name: Test
+        run: sbt -batch test
+
+      # A suite that discovers nothing is a failed suite. This service's whole test story is the
+      # tagless-final boundary, and "0 tests, success" would report that story as working.
+      - name: The suite must have run something
+        run: |
+          sbt -batch "show Test/definedTests" > tests.txt
+          grep -q 'NotifySuite' tests.txt || {
+            echo "the test suite discovered no NotifySuite; the tests did not run"
+            cat tests.txt
+            exit 1
+          }
+
+      - name: The jar must assemble
+        run: sbt -batch assembly
