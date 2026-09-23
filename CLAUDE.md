@@ -116,6 +116,16 @@ The rules are not advice here; several of them fail the build.
   copies files is evaluated at a moment sbt decides, and `sbt clean` then leaves
   the build pointing at a directory that no longer exists — which showed up as
   `Not found: notification` on the first clean build.
+- `.scalafmt.conf` pins **every** indent site to 2, not just `indent.main`. Scalafmt's
+  defaults indent a parameter list, a constructor, an `extends` clause and a `case`
+  by 4 while indenting blocks by 2, so a file drifts between two widths depending on
+  what is on the line above. `sbt scalafmtAll` formats, `sbt scalafmtCheckAll` fails
+  on anything unformatted.
+- **`sbt-scalafmt` is pinned to 2.5.5, and that is not an oversight.** 2.6.0 and later
+  require sbt 1.12.9+; this build is on 1.10.7, and so is the `SBT_VERSION` argument in
+  the Dockerfile. Bumping the plugin means bumping both, which changes what the image
+  builds with — a separate decision from how the source is laid out.
+
 - `.contracts/` is gitignored. `git ls-files '*.proto'` stays empty, as it does
   in every other service in this estate.
 
@@ -138,3 +148,17 @@ The rules are not advice here; several of them fail the build.
 - **A missing template parameter is refused, not rendered as a gap.** "Pesanan
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
+- **The words live in a catalogue, not in the code.** `Message.render` used to
+  hold Indonesian prose in Scala string interpolation, which put product copy
+  inside a codebase the estate keeps in English and left no room for a second
+  language. The copy is `src/main/resources/messages/id.json` now; `domain`
+  carries `MessageCatalogue` and `MessageCopy` as plain data, and
+  `infrastructure/JsonMessageCatalogue` is the only part that reads a file.
+  What a template *requires* is read from its own copy — every `{name}` in the
+  title or body must arrive in `params` — so a hand-kept list of required
+  parameters can no longer disagree with the words beside it.
+- **An incomplete catalogue fails the start.** `MessageCatalogue.of` refuses a
+  map that is missing any `Template`, and `Main` loads it before the server
+  binds. A template with no copy would otherwise surface as a customer who was
+  never told their order shipped, long after the deploy that caused it.
+

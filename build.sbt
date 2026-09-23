@@ -15,9 +15,6 @@ lazy val root = (project in file("."))
   .settings(
     name := "kinetix-notification-service",
 
-    // Only the protos this service speaks — common, identity and notification — narrowed by
-    // bin/sync-contracts when it fetches them. See that script for why the narrowing lives there
-    // and not here.
     Compile / PB.protoSources := Seq(file(".contracts/spoken")),
 
     scalacOptions ++= Seq(

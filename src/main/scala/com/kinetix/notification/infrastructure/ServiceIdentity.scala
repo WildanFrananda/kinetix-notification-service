@@ -7,7 +7,6 @@ import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.shaded.io.netty.handler.ssl.{ClientAuth, SslContext}
 
 object ServiceIdentity:
-
   def server(pkiDir: String): IO[SslContext] =
     for
       files <- read(pkiDir)

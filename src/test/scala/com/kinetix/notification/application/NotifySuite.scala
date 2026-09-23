@@ -8,14 +8,14 @@ import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.fakes.*
 
 class NotifySuite extends CatsEffectSuite:
-
   private def notify(
-      directory: RecipientDirectory[IO],
-      senders: List[NotificationSender[IO]],
-      repository: NotificationRepository[IO],
-      retry: RetryPolicy[IO]
+    directory: RecipientDirectory[IO],
+    senders: List[NotificationSender[IO]],
+    repository: NotificationRepository[IO],
+    retry: RetryPolicy[IO]
   ): Notify[IO] =
     Notify[IO](
+      Fixtures.catalogue,
       directory,
       senders,
       repository,
@@ -41,7 +41,10 @@ class NotifySuite extends CatsEffectSuite:
       stored <- repository.contents
       sent <- sender.sent.get
     yield
-      assertEquals(result, Left(NotificationError.TemplateParamMissing(Template.OrderPacked, "order_number")))
+      assertEquals(
+        result,
+        Left(NotificationError.TemplateParamMissing(Template.OrderPacked, "order_number"))
+      )
       assertEquals(asked, Nil, "identity must not be asked about a request that cannot be rendered")
       assertEquals(stored, Nil)
       assertEquals(sent, Nil)
@@ -65,7 +68,10 @@ class NotifySuite extends CatsEffectSuite:
       pushSent <- push.sent.get
     yield
       assert(result.isRight)
-      assertEquals(result.toOption.get.attempts.map(_.status), List(DeliveryStatus.Sent, DeliveryStatus.Sent))
+      assertEquals(
+        result.toOption.get.attempts.map(_.status),
+        List(DeliveryStatus.Sent, DeliveryStatus.Sent)
+      )
       assertEquals(emailSent.length, 1)
       assertEquals(pushSent.length, 1)
   }
@@ -218,7 +224,10 @@ class NotifySuite extends CatsEffectSuite:
 
     for
       directory <- FakeDirectory.holding(Fixtures.email)
-      email <- FakeSender.answering(Channel.Email, List(Left(unavailable), Left(unavailable), Right(())))
+      email <- FakeSender.answering(
+        Channel.Email,
+        List(Left(unavailable), Left(unavailable), Right(()))
+      )
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
       result <- notify(directory, List(email), repository, retry)(

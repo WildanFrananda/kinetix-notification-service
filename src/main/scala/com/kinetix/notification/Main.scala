@@ -15,6 +15,7 @@ import com.kinetix.notification.application.*
 import com.kinetix.notification.domain.EmailAddress
 import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.infrastructure.{
+  JsonMessageCatalogue,
   RandomNotificationIdSource,
   ServiceIdentity,
   SystemTimeSource
@@ -29,7 +30,6 @@ import com.kinetix.notification.infrastructure.persistence.{
 import com.kinetix.notification.infrastructure.retry.ExponentialBackoffRetry
 
 object Main extends IOApp:
-
   def run(args: List[String]): IO[ExitCode] =
     Settings.load.flatMap(serve)
 
@@ -67,11 +67,13 @@ object Main extends IOApp:
         )
       )
 
+      catalogue <- Resource.eval(JsonMessageCatalogue.load())
+
       retry: RetryPolicy[IO] = ExponentialBackoffRetry.default[IO]
       time: TimeSource[IO] = SystemTimeSource()
       ids: NotificationIdSource[IO] = RandomNotificationIdSource()
 
-      notify = Notify[IO](directory, senders, repository, retry, time, ids)
+      notify = Notify[IO](catalogue, directory, senders, repository, retry, time, ids)
       getDelivery = GetDelivery[IO](repository)
       registerDevice = RegisterDevice[IO](devices)
       forgetDevice = ForgetDevice[IO](devices)
@@ -98,7 +100,9 @@ object Main extends IOApp:
       connectEC = scala.concurrent.ExecutionContext.global
     )
 
-  private def identityClient(settings: Settings): Resource[IO, IdentityServiceFs2Grpc[IO, Metadata]] =
+  private def identityClient(
+    settings: Settings
+  ): Resource[IO, IdentityServiceFs2Grpc[IO, Metadata]] =
     for
       clientTls <- Resource.eval(ServiceIdentity.client(settings.pkiDir))
       channel <- NettyChannelBuilder
@@ -109,4 +113,6 @@ object Main extends IOApp:
     yield stub
 
   private def uri(name: String, raw: String): IO[Uri] =
-    IO.fromEither(Uri.fromString(raw).left.map(_ => IllegalStateException(s"$name is not a URL: $raw")))
+    IO.fromEither(
+      Uri.fromString(raw).left.map(_ => IllegalStateException(s"$name is not a URL: $raw"))
+    )

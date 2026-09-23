@@ -4,23 +4,22 @@ import cats.effect.IO
 import cats.syntax.all.*
 
 final case class Settings(
-    grpcPort: Int,
-    httpPort: Int,
-    identityGrpcUrl: String,
-    databaseUrl: String,
-    databaseUser: String,
-    databasePassword: String,
-    pushProviderUrl: String,
-    pushProviderKey: String,
-    emailProviderUrl: String,
-    emailProviderKey: String,
-    emailFromAddress: String,
-    pkiDir: String,
-    allowedPeers: Set[String]
+  grpcPort: Int,
+  httpPort: Int,
+  identityGrpcUrl: String,
+  databaseUrl: String,
+  databaseUser: String,
+  databasePassword: String,
+  pushProviderUrl: String,
+  pushProviderKey: String,
+  emailProviderUrl: String,
+  emailProviderKey: String,
+  emailFromAddress: String,
+  pkiDir: String,
+  allowedPeers: Set[String]
 )
 
 object Settings:
-
   def load: IO[Settings] =
     for
       grpcPort <- int("GRPC_PORT")
@@ -59,12 +58,12 @@ object Settings:
   private def required(name: String): IO[String] =
     IO(sys.env.get(name).map(_.trim).filter(_.nonEmpty)).flatMap:
       case Some(value) => IO.pure(value)
-      case None =>
+      case None        =>
         IO.raiseError(new IllegalStateException(s"$name is required and has no default."))
 
   private def int(name: String): IO[Int] =
     required(name).flatMap: raw =>
       raw.toIntOption match
         case Some(port) => IO.pure(port)
-        case None =>
+        case None       =>
           IO.raiseError(new IllegalStateException(s"$name is '$raw', which is not a port number."))

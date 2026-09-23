@@ -5,7 +5,6 @@ import notification.v1.notification as wire
 import com.kinetix.notification.domain as model
 
 private[grpc] object Writes:
-
   def delivery(notification: model.Notification): wire.GetDeliveryResponse =
     wire.GetDeliveryResponse(
       found = true,

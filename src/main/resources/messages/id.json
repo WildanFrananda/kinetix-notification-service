@@ -1,0 +1,26 @@
+{
+  "OrderPaid": {
+    "title": "Pembayaran diterima",
+    "body": "Pesanan {order_number} sudah dibayar dan sedang disiapkan."
+  },
+  "OrderPacked": {
+    "title": "Pesanan dikemas",
+    "body": "Pesanan {order_number} sudah dikemas dan menunggu kurir."
+  },
+  "CourierAssigned": {
+    "title": "Kurir ditugaskan",
+    "body": "Pesanan {order_number} dalam perjalanan. Nomor resi: {awb_number}."
+  },
+  "OrderDelivered": {
+    "title": "Pesanan sampai",
+    "body": "Pesanan {order_number} sudah sampai di tujuan."
+  },
+  "CourierOffer": {
+    "title": "Tawaran antar",
+    "body": "Antar pesanan {order_number}, ongkos {shipping_fee}. Terima sebelum kedaluwarsa."
+  },
+  "ReturnOpened": {
+    "title": "Pengembalian dibuka",
+    "body": "Pengembalian {return_number} untuk pesanan {order_number} sudah dicatat."
+  }
+}

@@ -13,11 +13,10 @@ import com.kinetix.notification.domain.{Address, Channel, DeviceToken, Message, 
 import com.kinetix.notification.domain.ports.NotificationSender
 
 final class HttpPushSender(
-    client: Client[IO],
-    endpoint: Uri,
-    apiKey: String
+  client: Client[IO],
+  endpoint: Uri,
+  apiKey: String
 ) extends NotificationSender[IO]:
-
   val channel: Channel = Channel.Push
 
   def send(to: Address, message: Message): IO[Either[NotificationError, Unit]] =
@@ -59,5 +58,10 @@ final class HttpPushSender(
         val trimmed = if detail.length > 300 then detail.take(300) else detail
 
         if response.status.responseClass == Status.ServerError then
-          NotificationError.SenderUnavailable(Channel.Push, s"${response.status.code}: $trimmed").asLeft
-        else NotificationError.SenderRejected(Channel.Push, s"${response.status.code}: $trimmed").asLeft
+          NotificationError
+            .SenderUnavailable(Channel.Push, s"${response.status.code}: $trimmed")
+            .asLeft
+        else
+          NotificationError
+            .SenderRejected(Channel.Push, s"${response.status.code}: $trimmed")
+            .asLeft

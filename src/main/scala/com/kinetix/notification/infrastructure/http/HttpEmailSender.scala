@@ -13,12 +13,11 @@ import com.kinetix.notification.domain.{Address, Channel, EmailAddress, Message,
 import com.kinetix.notification.domain.ports.NotificationSender
 
 final class HttpEmailSender(
-    client: Client[IO],
-    endpoint: Uri,
-    apiKey: String,
-    from: EmailAddress
+  client: Client[IO],
+  endpoint: Uri,
+  apiKey: String,
+  from: EmailAddress
 ) extends NotificationSender[IO]:
-
   val channel: Channel = Channel.Email
 
   def send(to: Address, message: Message): IO[Either[NotificationError, Unit]] =
@@ -57,5 +56,10 @@ final class HttpEmailSender(
         val trimmed = if detail.length > 300 then detail.take(300) else detail
 
         if response.status.responseClass == Status.ServerError then
-          NotificationError.SenderUnavailable(Channel.Email, s"${response.status.code}: $trimmed").asLeft
-        else NotificationError.SenderRejected(Channel.Email, s"${response.status.code}: $trimmed").asLeft
+          NotificationError
+            .SenderUnavailable(Channel.Email, s"${response.status.code}: $trimmed")
+            .asLeft
+        else
+          NotificationError
+            .SenderRejected(Channel.Email, s"${response.status.code}: $trimmed")
+            .asLeft

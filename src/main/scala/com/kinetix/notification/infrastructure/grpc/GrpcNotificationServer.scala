@@ -10,19 +10,18 @@ import com.kinetix.notification.application.*
 import com.kinetix.notification.domain as model
 
 final class GrpcNotificationServer(
-    notify: Notify[IO],
-    getDelivery: GetDelivery[IO],
-    registerDevice: RegisterDevice[IO],
-    forgetDevice: ForgetDevice[IO]
+  notify: Notify[IO],
+  getDelivery: GetDelivery[IO],
+  registerDevice: RegisterDevice[IO],
+  forgetDevice: ForgetDevice[IO]
 ) extends wire.NotificationServiceFs2Grpc[IO, Metadata]:
-
   def notify(request: wire.NotifyRequest, ctx: Metadata): IO[wire.NotifyResponse] =
     Reads.notifyRequest(request) match
       case Left(error) => IO.pure(refuseNotify(error))
       case Right(read) =>
         notify(read.recipient, read.template, request.params, read.channels, read.idempotencyKey)
           .map:
-            case Left(error) => refuseNotify(error)
+            case Left(error)    => refuseNotify(error)
             case Right(outcome) =>
               wire.NotifyResponse(
                 accepted = true,
@@ -32,7 +31,7 @@ final class GrpcNotificationServer(
 
   def getDelivery(request: wire.GetDeliveryRequest, ctx: Metadata): IO[wire.GetDeliveryResponse] =
     model.NotificationId.fromString(request.notificationId) match
-      case None => IO.pure(wire.GetDeliveryResponse(found = false))
+      case None     => IO.pure(wire.GetDeliveryResponse(found = false))
       case Some(id) =>
         getDelivery(id).map:
           case Left(_)        => wire.GetDeliveryResponse(found = false)
@@ -40,8 +39,8 @@ final class GrpcNotificationServer(
           case Right(Some(n)) => Writes.delivery(n)
 
   def registerDevice(
-      request: wire.RegisterDeviceRequest,
-      ctx: Metadata
+    request: wire.RegisterDeviceRequest,
+    ctx: Metadata
   ): IO[wire.RegisterDeviceResponse] =
     (
       model.PrincipalId.fromString(request.principalId),
@@ -53,11 +52,14 @@ final class GrpcNotificationServer(
         IO.pure(refuseRegister(model.NotificationError.InvalidDeviceToken))
       case (Some(principal), Some(token)) =>
         registerDevice(principal, token, Reads.platform(request.platform)).map:
-          case Left(error) => refuseRegister(error)
+          case Left(error)         => refuseRegister(error)
           case Right(alreadyKnown) =>
             wire.RegisterDeviceResponse(registered = true, alreadyRegistered = alreadyKnown)
 
-  def forgetDevice(request: wire.ForgetDeviceRequest, ctx: Metadata): IO[wire.ForgetDeviceResponse] =
+  def forgetDevice(
+    request: wire.ForgetDeviceRequest,
+    ctx: Metadata
+  ): IO[wire.ForgetDeviceResponse] =
     model.DeviceToken.fromString(request.deviceToken) match
       case None =>
         IO.pure(
@@ -69,8 +71,11 @@ final class GrpcNotificationServer(
       case Some(token) =>
         forgetDevice(token).map:
           case Left(error) =>
-            wire.ForgetDeviceResponse(forgotten = false, error = Some(detail(Codes.of(error), error)))
-          case Right(())  => wire.ForgetDeviceResponse(forgotten = true)
+            wire.ForgetDeviceResponse(
+              forgotten = false,
+              error = Some(detail(Codes.of(error), error))
+            )
+          case Right(()) => wire.ForgetDeviceResponse(forgotten = true)
 
   private def refuseNotify(error: model.NotificationError): wire.NotifyResponse =
     wire.NotifyResponse(accepted = false, error = Some(detail(Codes.of(error), error)))

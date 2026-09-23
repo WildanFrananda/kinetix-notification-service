@@ -5,12 +5,11 @@ import notification.v1.notification as wire
 import com.kinetix.notification.domain as model
 
 private[grpc] object Reads:
-
   final case class NotifyRead(
-      recipient: model.PrincipalId,
-      template: model.Template,
-      channels: List[model.Channel],
-      idempotencyKey: Option[model.IdempotencyKey]
+    recipient: model.PrincipalId,
+    template: model.Template,
+    channels: List[model.Channel],
+    idempotencyKey: Option[model.IdempotencyKey]
   )
 
   def notifyRequest(request: wire.NotifyRequest): Either[model.NotificationError, NotifyRead] =
@@ -23,7 +22,8 @@ private[grpc] object Reads:
       recipient = recipient,
       template = template,
       channels = request.channels.toList.flatMap(channel),
-      idempotencyKey = request.idempotencyKey.flatMap(key => model.IdempotencyKey.fromString(key.key))
+      idempotencyKey =
+        request.idempotencyKey.flatMap(key => model.IdempotencyKey.fromString(key.key))
     )
 
   def template(raw: wire.Template): Option[model.Template] = raw match

@@ -5,7 +5,6 @@ import io.circe.{Encoder, parser}
 import com.kinetix.notification.domain.*
 
 private[persistence] object Codecs:
-
   def templateTo(template: Template): String = template match
     case Template.OrderPaid       => "ORDER_PAID"
     case Template.OrderPacked     => "ORDER_PACKED"
