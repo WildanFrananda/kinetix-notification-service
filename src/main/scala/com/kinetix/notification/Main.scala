@@ -94,9 +94,9 @@ object Main extends IOApp:
   private def database(settings: Settings): Resource[IO, HikariTransactor[IO]] =
     HikariTransactor.newHikariTransactor[IO](
       driverClassName = "org.postgresql.Driver",
-      url = settings.databaseUrl,
-      user = settings.databaseUser,
-      pass = settings.databasePassword,
+      url = settings.database.url,
+      user = settings.database.user,
+      pass = settings.database.password,
       connectEC = scala.concurrent.ExecutionContext.global
     )
 

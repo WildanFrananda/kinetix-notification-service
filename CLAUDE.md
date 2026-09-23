@@ -148,6 +148,16 @@ The rules are not advice here; several of them fail the build.
 - **A missing template parameter is refused, not rendered as a gap.** "Pesanan
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
+- **The schema has its own entry point.** `Migrate` runs Flyway once and exits; the
+  service waits for that exit to be a zero, the way every other service in this estate
+  does it. Migrating from inside `Main` would have every replica racing to change the
+  same schema at start-up, and would make a failed migration look like a service that
+  would not boot.
+- **The migrator reads `DatabaseSettings`, not `Settings`.** Creating a table does not
+  need a push provider key, and a container that holds one it never uses is a credential
+  in an extra place for no reason. It also means the schema stays fixable on a day the
+  provider has not been chosen.
+
 - **The words live in a catalogue, not in the code.** `Message.render` used to
   hold Indonesian prose in Scala string interpolation, which put product copy
   inside a codebase the estate keeps in English and left no room for a second
