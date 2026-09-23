@@ -53,6 +53,8 @@ ENV KINETIX_SERVICE_VERSION=${SERVICE_VERSION}
 USER kinetix
 
 # 50051 warehouse, 50052 identity, 50053 matching, 50054 pricing, 50055 order, 50056 payment.
+# 8004 is HTTP: /health, /health/ready and /metrics only. The notification surface is gRPC.
 EXPOSE 50057
+EXPOSE 8004
 
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "/app/service.jar"]

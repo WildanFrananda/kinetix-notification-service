@@ -8,6 +8,7 @@ val http4sV     = "0.23.30"
 val circeV      = "0.14.10"
 val doobieV     = "1.0.0-RC6"
 val flywayV     = "11.8.2"
+val grpcV       = "1.69.0"
 val log4catsV   = "2.7.0"
 val munitCatsV  = "2.0.0"
 
@@ -48,7 +49,8 @@ lazy val root = (project in file("."))
       "org.flywaydb"    % "flyway-database-postgresql" % flywayV,
       "org.typelevel"  %% "log4cats-slf4j"       % log4catsV,
       "ch.qos.logback"  % "logback-classic"      % "1.5.15",
-      "io.grpc"         % "grpc-netty-shaded"    % "1.69.0",
+      "io.grpc"         % "grpc-netty-shaded"    % grpcV,
+      "io.grpc"         % "grpc-services"        % grpcV,
 
       "org.typelevel"  %% "munit-cats-effect"    % munitCatsV % Test
     ),

@@ -148,6 +148,28 @@ The rules are not advice here; several of them fail the build.
 - **A missing template parameter is refused, not rendered as a gap.** "Pesanan
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
+- **The HTTP port serves three things and no business.** `/health`, `/health/ready` and
+  `/metrics`. Everything a caller wants from this service is gRPC behind mTLS; the HTTP
+  listener exists so a container orchestrator and a scraper can do their jobs without
+  holding a client certificate.
+- **Readiness asks the database a real question.** A process that has bound a port is not
+  a service that can work — the pool can be exhausted, the password can have rotated. The
+  reason a probe failed is logged and deliberately **not** put in the response body: a
+  driver's message can carry the connection string, and that endpoint is unauthenticated.
+- **Metrics are seeded at zero when the process starts.** A counter that appears only once
+  it has been incremented makes "nothing has failed yet" and "this service does not report
+  failures" the same observation, and the estate's deploy gate greps for a sample line, not
+  a `# TYPE` header. The gRPC method names come off the bound service descriptor, so a
+  method renamed in the contract cannot leave a counter behind under its old name.
+- **Every metric label is bounded by construction.** A route label is one of
+  `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. An id in
+  a label is one time series per request, forever.
+- **Reflection is `ProtoReflectionServiceV1`, not `ProtoReflectionService`.** The latter is
+  `@Deprecated` in grpc-java, and `-deprecation -Xfatal-warnings` refuses to compile it.
+- **`logback.xml` exists so the root logger is not DEBUG.** Logback with no configuration
+  defaults to DEBUG on root, which had Flyway printing every statement it parsed and would
+  have had doobie printing every query in production.
+
 - **The schema has its own entry point.** `Migrate` runs Flyway once and exits; the
   service waits for that exit to be a zero, the way every other service in this estate
   does it. Migrating from inside `Main` would have every replica racing to change the
