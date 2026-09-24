@@ -5,7 +5,6 @@ import doobie.*
 import doobie.implicits.*
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
-
 object PostgresReadiness:
   def check(transactor: Transactor[IO]): IO[Boolean] =
     sql"SELECT 1"

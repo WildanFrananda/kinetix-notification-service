@@ -29,6 +29,8 @@ import com.kinetix.notification.infrastructure.{
 import com.kinetix.notification.infrastructure.config.Settings
 import com.kinetix.notification.infrastructure.grpc.*
 import com.kinetix.notification.infrastructure.http.{
+  GoogleAccessTokens,
+  GoogleServiceAccount,
   HttpApi,
   HttpEmailSender,
   HttpMetrics,
@@ -71,8 +73,14 @@ object Main extends IOApp:
       pushEndpoint <- Resource.eval(uri("PUSH_PROVIDER_URL", settings.pushProviderUrl))
       emailEndpoint <- Resource.eval(uri("EMAIL_PROVIDER_URL", settings.emailProviderUrl))
 
+      pushAccount <- Resource.eval(
+        GoogleServiceAccount
+          .fromBase64("PUSH_PROVIDER_CREDENTIALS_B64", settings.pushCredentialsB64)
+      )
+      pushTokens <- Resource.eval(GoogleAccessTokens.create(httpClient, pushAccount))
+
       senders: List[NotificationSender[IO]] = List(
-        HttpPushSender(httpClient, pushEndpoint, settings.pushProviderKey),
+        HttpPushSender(httpClient, pushEndpoint, pushTokens.token),
         HttpEmailSender(httpClient, emailEndpoint, settings.emailProviderKey, emailFrom)
       )
 

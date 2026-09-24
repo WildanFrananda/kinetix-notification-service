@@ -15,7 +15,7 @@ import com.kinetix.notification.domain.ports.NotificationSender
 final class HttpPushSender(
   client: Client[IO],
   endpoint: Uri,
-  apiKey: String
+  bearer: IO[String]
 ) extends NotificationSender[IO]:
   val channel: Channel = Channel.Push
 
@@ -29,13 +29,13 @@ final class HttpPushSender(
         )
 
       case Address.Push(token) =>
-        val request = Request[IO](Method.POST, endpoint)
-          .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, apiKey)))
-          .withEntity(body(token, message))
+        bearer
+          .flatMap: credential =>
+            val request = Request[IO](Method.POST, endpoint)
+              .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, credential)))
+              .withEntity(body(token, message))
 
-        client
-          .run(request)
-          .use(interpret)
+            client.run(request).use(interpret)
           .handleError(throwable =>
             NotificationError.SenderUnavailable(Channel.Push, throwable.getMessage).asLeft
           )

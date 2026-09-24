@@ -8,7 +8,7 @@ final case class Settings(
   identityGrpcUrl: String,
   database: DatabaseSettings,
   pushProviderUrl: String,
-  pushProviderKey: String,
+  pushCredentialsB64: String,
   emailProviderUrl: String,
   emailProviderKey: String,
   emailFromAddress: String,
@@ -24,7 +24,7 @@ object Settings:
       identity <- Env.required("IDENTITY_GRPC_URL")
       database <- DatabaseSettings.load
       pushUrl <- Env.required("PUSH_PROVIDER_URL")
-      pushKey <- Env.required("PUSH_PROVIDER_KEY")
+      pushCredentials <- Env.required("PUSH_PROVIDER_CREDENTIALS_B64")
       emailUrl <- Env.required("EMAIL_PROVIDER_URL")
       emailKey <- Env.required("EMAIL_PROVIDER_KEY")
       emailFrom <- Env.required("EMAIL_FROM_ADDRESS")
@@ -40,7 +40,7 @@ object Settings:
       identity,
       database,
       pushUrl,
-      pushKey,
+      pushCredentials,
       emailUrl,
       emailKey,
       emailFrom,

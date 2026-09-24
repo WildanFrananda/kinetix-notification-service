@@ -148,6 +148,22 @@ The rules are not advice here; several of them fail the build.
 - **A missing template parameter is refused, not rendered as a gap.** "Pesanan
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
+- **Push is FCM HTTP v1, and its credential expires every hour.** `HttpPushSender` takes
+  `bearer: IO[String]`, not an API key: `GoogleAccessTokens` signs an RS256 assertion with
+  the service account key and exchanges it for an access token, holding that token until a
+  minute before it expires. The key-in-a-header form belonged to the legacy FCM endpoint,
+  which Google retired in July 2024 — a static credential there does not degrade, it returns
+  401 for every notification the estate ever sends. The JSON key arrives as
+  `PUSH_PROVIDER_CREDENTIALS_B64`, base64 because it is multi-line and holds a PEM block, and
+  every layer between the secret store and here has its own opinion about newlines.
+- **Email is Resend.** `HttpEmailSender` posts `{from, to: [...], subject, text}` with a
+  bearer key, which is Resend's API exactly. Brevo wants `sender`/`textContent` and an
+  `api-key` header, and an SMTP relay is not an HTTP call at all — either would be a rewrite
+  of this adapter, not a change of URL.
+- **No Google client library.** `java.security` signs the assertion and the existing http4s
+  client makes the exchange, so the token cache is a `Ref` with no background thread and no
+  second HTTP stack in the image.
+
 - **The HTTP port serves three things and no business.** `/health`, `/health/ready` and
   `/metrics`. Everything a caller wants from this service is gRPC behind mTLS; the HTTP
   listener exists so a container orchestrator and a scraper can do their jobs without
