@@ -7,6 +7,8 @@ val fs2V        = "3.11.0"
 val http4sV     = "0.23.30"
 val circeV      = "0.14.10"
 val doobieV     = "1.0.0-RC6"
+val flywayV     = "11.8.2"
+val grpcV       = "1.69.0"
 val log4catsV   = "2.7.0"
 val munitCatsV  = "2.0.0"
 
@@ -15,9 +17,6 @@ lazy val root = (project in file("."))
   .settings(
     name := "kinetix-notification-service",
 
-    // Only the protos this service speaks — common, identity and notification — narrowed by
-    // bin/sync-contracts when it fetches them. See that script for why the narrowing lives there
-    // and not here.
     Compile / PB.protoSources := Seq(file(".contracts/spoken")),
 
     scalacOptions ++= Seq(
@@ -46,9 +45,12 @@ lazy val root = (project in file("."))
       "org.tpolecat"   %% "doobie-core"          % doobieV,
       "org.tpolecat"   %% "doobie-hikari"        % doobieV,
       "org.tpolecat"   %% "doobie-postgres"      % doobieV,
+      "org.flywaydb"    % "flyway-core"          % flywayV,
+      "org.flywaydb"    % "flyway-database-postgresql" % flywayV,
       "org.typelevel"  %% "log4cats-slf4j"       % log4catsV,
       "ch.qos.logback"  % "logback-classic"      % "1.5.15",
-      "io.grpc"         % "grpc-netty-shaded"    % "1.69.0",
+      "io.grpc"         % "grpc-netty-shaded"    % grpcV,
+      "io.grpc"         % "grpc-services"        % grpcV,
 
       "org.typelevel"  %% "munit-cats-effect"    % munitCatsV % Test
     ),

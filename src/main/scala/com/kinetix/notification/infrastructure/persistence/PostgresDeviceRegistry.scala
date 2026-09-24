@@ -9,7 +9,6 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.DeviceRegistry
 
 final class PostgresDeviceRegistry(transactor: Transactor[IO]) extends DeviceRegistry[IO]:
-
   def tokensFor(principal: PrincipalId): IO[Either[NotificationError, List[DeviceToken]]] =
     val query =
       sql"""
@@ -22,9 +21,9 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO]) extends DeviceReg
     run(query).map(_.map(_.flatMap(DeviceToken.fromString)))
 
   def register(
-      principal: PrincipalId,
-      token: DeviceToken,
-      platform: DevicePlatform
+    principal: PrincipalId,
+    token: DeviceToken,
+    platform: DevicePlatform
   ): IO[Either[NotificationError, Boolean]] =
     val query =
       for

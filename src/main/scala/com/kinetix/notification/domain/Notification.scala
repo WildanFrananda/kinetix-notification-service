@@ -3,13 +3,13 @@ package com.kinetix.notification.domain
 import java.time.Instant
 
 final case class Notification(
-    id: NotificationId,
-    recipient: PrincipalId,
-    template: Template,
-    params: Map[String, String],
-    idempotencyKey: Option[IdempotencyKey],
-    attempts: List[DeliveryAttempt],
-    createdAt: Instant
+  id: NotificationId,
+  recipient: PrincipalId,
+  template: Template,
+  params: Map[String, String],
+  idempotencyKey: Option[IdempotencyKey],
+  attempts: List[DeliveryAttempt],
+  createdAt: Instant
 ):
   def reached: Boolean = attempts.exists(_.status == DeliveryStatus.Sent)
 

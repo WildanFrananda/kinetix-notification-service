@@ -12,22 +12,27 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.NotificationRepository
 
 final class PostgresNotificationRepository(transactor: Transactor[IO])
-    extends NotificationRepository[IO]:
-
+  extends NotificationRepository[IO]:
   def find(id: NotificationId): IO[Either[NotificationError, Option[Notification]]] =
     val query =
       for
         header <- Queries.selectById(id.value).option
-        attempts <- header.traverse(_ => Queries.selectAttempts(id.value).to[List]).map(_.getOrElse(Nil))
+        attempts <- header
+          .traverse(_ => Queries.selectAttempts(id.value).to[List])
+          .map(_.getOrElse(Nil))
       yield header.map(Rows.toNotification(_, attempts))
 
     run(query)
 
-  def findByIdempotencyKey(key: IdempotencyKey): IO[Either[NotificationError, Option[Notification]]] =
+  def findByIdempotencyKey(
+    key: IdempotencyKey
+  ): IO[Either[NotificationError, Option[Notification]]] =
     val query =
       for
         header <- Queries.selectByIdempotencyKey(key.value).option
-        attempts <- header.traverse(row => Queries.selectAttempts(row.id).to[List]).map(_.getOrElse(Nil))
+        attempts <- header
+          .traverse(row => Queries.selectAttempts(row.id).to[List])
+          .map(_.getOrElse(Nil))
       yield header.map(Rows.toNotification(_, attempts))
 
     run(query)
@@ -35,7 +40,10 @@ final class PostgresNotificationRepository(transactor: Transactor[IO])
   def save(notification: Notification): IO[Either[NotificationError, Unit]] =
     run(Queries.insert(notification).run.void)
 
-  def recordAttempt(id: NotificationId, attempt: DeliveryAttempt): IO[Either[NotificationError, Unit]] =
+  def recordAttempt(
+    id: NotificationId,
+    attempt: DeliveryAttempt
+  ): IO[Either[NotificationError, Unit]] =
     run(Queries.upsertAttempt(id.value, attempt).run.void)
 
   private def run[A](query: ConnectionIO[A]): IO[Either[NotificationError, A]] =
@@ -46,20 +54,20 @@ final class PostgresNotificationRepository(transactor: Transactor[IO])
 
 private object Rows:
   final case class Header(
-      id: String,
-      recipientPrincipalId: String,
-      template: String,
-      params: String,
-      idempotencyKey: Option[String],
-      createdAt: Instant
+    id: String,
+    recipientPrincipalId: String,
+    template: String,
+    params: String,
+    idempotencyKey: Option[String],
+    createdAt: Instant
   )
 
   final case class Attempt(
-      channel: String,
-      status: String,
-      attempts: Int,
-      lastError: Option[String],
-      lastAttemptAt: Instant
+    channel: String,
+    status: String,
+    attempts: Int,
+    lastError: Option[String],
+    lastAttemptAt: Instant
   )
 
   def toNotification(header: Header, attempts: List[Attempt]): Notification =

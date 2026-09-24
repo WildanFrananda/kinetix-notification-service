@@ -3,16 +3,15 @@ package com.kinetix.notification.infrastructure.grpc
 import io.grpc.*
 
 final class PeerAuthorizationInterceptor(allowed: Set[String]) extends ServerInterceptor:
-
   override def interceptCall[Q, S](
-      call: ServerCall[Q, S],
-      headers: Metadata,
-      next: ServerCallHandler[Q, S]
+    call: ServerCall[Q, S],
+    headers: Metadata,
+    next: ServerCallHandler[Q, S]
   ): ServerCall.Listener[Q] =
     peerName(call) match
       case Some(peer) if allowed.contains(peer) => next.startCall(call, headers)
-      case Some(peer)                           => refuse(call, s"'$peer' is not on this service's caller list")
-      case None                                 => refuse(call, "the caller's certificate names no service")
+      case Some(peer) => refuse(call, s"'$peer' is not on this service's caller list")
+      case None       => refuse(call, "the caller's certificate names no service")
 
   private def peerName[Q, S](call: ServerCall[Q, S]): Option[String] =
     Option(call.getAttributes.get(Grpc.TRANSPORT_ATTR_SSL_SESSION)).flatMap { session =>

@@ -9,24 +9,26 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.*
 
 final class FakeDirectory(
-    answer: Either[NotificationError, Recipient],
-    val asked: Ref[IO, List[PrincipalId]]
+  answer: Either[NotificationError, Recipient],
+  val asked: Ref[IO, List[PrincipalId]]
 ) extends RecipientDirectory[IO]:
   def lookup(principal: PrincipalId): IO[Either[NotificationError, Recipient]] =
     asked.update(_ :+ principal).as(answer)
 
 object FakeDirectory:
   def holding(addresses: Address*): IO[FakeDirectory] =
-    Ref.of[IO, List[PrincipalId]](Nil).map: asked =>
-      FakeDirectory(Recipient(Fixtures.recipient, addresses.toList).asRight, asked)
+    Ref
+      .of[IO, List[PrincipalId]](Nil)
+      .map: asked =>
+        FakeDirectory(Recipient(Fixtures.recipient, addresses.toList).asRight, asked)
 
   def failing(error: NotificationError): IO[FakeDirectory] =
     Ref.of[IO, List[PrincipalId]](Nil).map(FakeDirectory(error.asLeft, _))
 
 final class FakeSender(
-    val channel: Channel,
-    answers: Ref[IO, List[Either[NotificationError, Unit]]],
-    val sent: Ref[IO, List[(Address, Message)]]
+  val channel: Channel,
+  answers: Ref[IO, List[Either[NotificationError, Unit]]],
+  val sent: Ref[IO, List[(Address, Message)]]
 ) extends NotificationSender[IO]:
   def send(to: Address, message: Message): IO[Either[NotificationError, Unit]] =
     for
@@ -50,25 +52,29 @@ object FakeSender:
     yield FakeSender(channel, queue, sent)
 
 final class FakeRepository(
-    stored: Ref[IO, Map[String, Notification]],
-    val saves: Ref[IO, List[NotificationId]]
+  stored: Ref[IO, Map[String, Notification]],
+  val saves: Ref[IO, List[NotificationId]]
 ) extends NotificationRepository[IO]:
-
   def find(id: NotificationId): IO[Either[NotificationError, Option[Notification]]] =
     stored.get.map(_.get(id.value).asRight)
 
-  def findByIdempotencyKey(key: IdempotencyKey): IO[Either[NotificationError, Option[Notification]]] =
+  def findByIdempotencyKey(
+    key: IdempotencyKey
+  ): IO[Either[NotificationError, Option[Notification]]] =
     stored.get.map(_.values.find(_.idempotencyKey.exists(_.value == key.value)).asRight)
 
   def save(notification: Notification): IO[Either[NotificationError, Unit]] =
     stored.update(_ + (notification.id.value -> notification)) *>
       saves.update(_ :+ notification.id).as(().asRight)
 
-  def recordAttempt(id: NotificationId, attempt: DeliveryAttempt): IO[Either[NotificationError, Unit]] =
+  def recordAttempt(
+    id: NotificationId,
+    attempt: DeliveryAttempt
+  ): IO[Either[NotificationError, Unit]] =
     stored
       .update: current =>
         current.get(id.value) match
-          case None => current
+          case None           => current
           case Some(existing) =>
             val kept = existing.attempts.filterNot(_.channel == attempt.channel)
             current + (id.value -> existing.copy(attempts = kept :+ attempt))
@@ -91,11 +97,11 @@ final class CountingRetry(maxAttempts: Int, val runs: Ref[IO, Int]) extends Retr
     attempt(operation, maxAttempts - 1)
 
   private def attempt[A](
-      operation: IO[Either[NotificationError, A]],
-      remaining: Int
+    operation: IO[Either[NotificationError, A]],
+    remaining: Int
   ): IO[Either[NotificationError, A]] =
     runs.update(_ + 1) *> operation.flatMap:
-      case right @ Right(_) => right.pure[IO].widen
+      case right @ Right(_)   => right.pure[IO].widen
       case left @ Left(error) =>
         if remaining <= 0 || !error.isTransient then left.pure[IO].widen
         else attempt(operation, remaining - 1)
@@ -111,20 +117,23 @@ final class FixedIds(id: NotificationId) extends NotificationIdSource[IO]:
   def next: IO[NotificationId] = IO.pure(id)
 
 final class FakeDeviceRegistry(
-    tokens: Ref[IO, Map[String, (PrincipalId, DevicePlatform)]]
+  tokens: Ref[IO, Map[String, (PrincipalId, DevicePlatform)]]
 ) extends DeviceRegistry[IO]:
-
   def tokensFor(principal: PrincipalId): IO[Either[NotificationError, List[DeviceToken]]] =
     tokens.get.map: current =>
-      current.collect {
-        case (token, (owner, _)) if owner.value == principal.value =>
-          DeviceToken.fromString(token)
-      }.flatten.toList.asRight
+      current
+        .collect {
+          case (token, (owner, _)) if owner.value == principal.value =>
+            DeviceToken.fromString(token)
+        }
+        .flatten
+        .toList
+        .asRight
 
   def register(
-      principal: PrincipalId,
-      token: DeviceToken,
-      platform: DevicePlatform
+    principal: PrincipalId,
+    token: DeviceToken,
+    platform: DevicePlatform
   ): IO[Either[NotificationError, Boolean]] =
     for
       current <- tokens.get
@@ -150,3 +159,9 @@ object Fixtures:
   val push: Address = Address.Push(DeviceToken.fromString("handset-token-1").get)
 
   val orderParams: Map[String, String] = Map("order_number" -> "ORD-20260921-ABCD1234")
+
+  val catalogue: MessageCatalogue = MessageCatalogue(
+    Template.values
+      .map(template => template -> MessageCopy(template.toString, "Order {order_number}."))
+      .toMap
+  )

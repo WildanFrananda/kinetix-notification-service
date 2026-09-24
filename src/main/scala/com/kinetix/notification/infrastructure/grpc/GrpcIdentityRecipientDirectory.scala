@@ -10,7 +10,7 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.RecipientDirectory
 
 final class GrpcIdentityRecipientDirectory(identity: IdentityServiceFs2Grpc[IO, Metadata])
-    extends RecipientDirectory[IO]:
+  extends RecipientDirectory[IO]:
 
   def lookup(principal: PrincipalId): IO[Either[NotificationError, Recipient]] =
     identity
@@ -20,6 +20,4 @@ final class GrpcIdentityRecipientDirectory(identity: IdentityServiceFs2Grpc[IO, 
         else
           val addresses = EmailAddress.fromString(response.email).map(Address.Email.apply).toList
           Recipient(principal, addresses).asRight
-      .handleError(throwable =>
-        NotificationError.DirectoryUnavailable(throwable.getMessage).asLeft
-      )
+      .handleError(throwable => NotificationError.DirectoryUnavailable(throwable.getMessage).asLeft)

@@ -10,6 +10,6 @@ trait NotificationRepository[F[_]]:
   def save(notification: Notification): F[Either[NotificationError, Unit]]
 
   def recordAttempt(
-      id: NotificationId,
-      attempt: DeliveryAttempt
+    id: NotificationId,
+    attempt: DeliveryAttempt
   ): F[Either[NotificationError, Unit]]

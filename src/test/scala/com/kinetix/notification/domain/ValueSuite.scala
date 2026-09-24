@@ -15,7 +15,10 @@ class ValueSuite extends FunSuite:
   }
 
   test("an email address needs a local part, an at, and a dot in the domain") {
-    assertEquals(EmailAddress.fromString("buyer@kinetix.test").map(_.value), Some("buyer@kinetix.test"))
+    assertEquals(
+      EmailAddress.fromString("buyer@kinetix.test").map(_.value),
+      Some("buyer@kinetix.test")
+    )
     assertEquals(EmailAddress.fromString("buyer@localhost"), None)
     assertEquals(EmailAddress.fromString("@kinetix.test"), None)
     assertEquals(EmailAddress.fromString("buyer kinetix.test"), None)

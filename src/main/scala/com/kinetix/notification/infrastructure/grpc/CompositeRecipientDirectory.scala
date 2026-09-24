@@ -7,7 +7,7 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.RecipientDirectory
 
 final class CompositeRecipientDirectory(parts: List[RecipientDirectory[IO]])
-    extends RecipientDirectory[IO]:
+  extends RecipientDirectory[IO]:
 
   def lookup(principal: PrincipalId): IO[Either[NotificationError, Recipient]] =
     parts

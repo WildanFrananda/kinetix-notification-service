@@ -116,6 +116,16 @@ The rules are not advice here; several of them fail the build.
   copies files is evaluated at a moment sbt decides, and `sbt clean` then leaves
   the build pointing at a directory that no longer exists — which showed up as
   `Not found: notification` on the first clean build.
+- `.scalafmt.conf` pins **every** indent site to 2, not just `indent.main`. Scalafmt's
+  defaults indent a parameter list, a constructor, an `extends` clause and a `case`
+  by 4 while indenting blocks by 2, so a file drifts between two widths depending on
+  what is on the line above. `sbt scalafmtAll` formats, `sbt scalafmtCheckAll` fails
+  on anything unformatted.
+- **`sbt-scalafmt` is pinned to 2.5.5, and that is not an oversight.** 2.6.0 and later
+  require sbt 1.12.9+; this build is on 1.10.7, and so is the `SBT_VERSION` argument in
+  the Dockerfile. Bumping the plugin means bumping both, which changes what the image
+  builds with — a separate decision from how the source is laid out.
+
 - `.contracts/` is gitignored. `git ls-files '*.proto'` stays empty, as it does
   in every other service in this estate.
 
@@ -138,3 +148,65 @@ The rules are not advice here; several of them fail the build.
 - **A missing template parameter is refused, not rendered as a gap.** "Pesanan
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
+- **Push is FCM HTTP v1, and its credential expires every hour.** `HttpPushSender` takes
+  `bearer: IO[String]`, not an API key: `GoogleAccessTokens` signs an RS256 assertion with
+  the service account key and exchanges it for an access token, holding that token until a
+  minute before it expires. The key-in-a-header form belonged to the legacy FCM endpoint,
+  which Google retired in July 2024 — a static credential there does not degrade, it returns
+  401 for every notification the estate ever sends. The JSON key arrives as
+  `PUSH_PROVIDER_CREDENTIALS_B64`, base64 because it is multi-line and holds a PEM block, and
+  every layer between the secret store and here has its own opinion about newlines.
+- **Email is Resend.** `HttpEmailSender` posts `{from, to: [...], subject, text}` with a
+  bearer key, which is Resend's API exactly. Brevo wants `sender`/`textContent` and an
+  `api-key` header, and an SMTP relay is not an HTTP call at all — either would be a rewrite
+  of this adapter, not a change of URL.
+- **No Google client library.** `java.security` signs the assertion and the existing http4s
+  client makes the exchange, so the token cache is a `Ref` with no background thread and no
+  second HTTP stack in the image.
+
+- **The HTTP port serves three things and no business.** `/health`, `/health/ready` and
+  `/metrics`. Everything a caller wants from this service is gRPC behind mTLS; the HTTP
+  listener exists so a container orchestrator and a scraper can do their jobs without
+  holding a client certificate.
+- **Readiness asks the database a real question.** A process that has bound a port is not
+  a service that can work — the pool can be exhausted, the password can have rotated. The
+  reason a probe failed is logged and deliberately **not** put in the response body: a
+  driver's message can carry the connection string, and that endpoint is unauthenticated.
+- **Metrics are seeded at zero when the process starts.** A counter that appears only once
+  it has been incremented makes "nothing has failed yet" and "this service does not report
+  failures" the same observation, and the estate's deploy gate greps for a sample line, not
+  a `# TYPE` header. The gRPC method names come off the bound service descriptor, so a
+  method renamed in the contract cannot leave a counter behind under its old name.
+- **Every metric label is bounded by construction.** A route label is one of
+  `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. An id in
+  a label is one time series per request, forever.
+- **Reflection is `ProtoReflectionServiceV1`, not `ProtoReflectionService`.** The latter is
+  `@Deprecated` in grpc-java, and `-deprecation -Xfatal-warnings` refuses to compile it.
+- **`logback.xml` exists so the root logger is not DEBUG.** Logback with no configuration
+  defaults to DEBUG on root, which had Flyway printing every statement it parsed and would
+  have had doobie printing every query in production.
+
+- **The schema has its own entry point.** `Migrate` runs Flyway once and exits; the
+  service waits for that exit to be a zero, the way every other service in this estate
+  does it. Migrating from inside `Main` would have every replica racing to change the
+  same schema at start-up, and would make a failed migration look like a service that
+  would not boot.
+- **The migrator reads `DatabaseSettings`, not `Settings`.** Creating a table does not
+  need a push provider key, and a container that holds one it never uses is a credential
+  in an extra place for no reason. It also means the schema stays fixable on a day the
+  provider has not been chosen.
+
+- **The words live in a catalogue, not in the code.** `Message.render` used to
+  hold Indonesian prose in Scala string interpolation, which put product copy
+  inside a codebase the estate keeps in English and left no room for a second
+  language. The copy is `src/main/resources/messages/id.json` now; `domain`
+  carries `MessageCatalogue` and `MessageCopy` as plain data, and
+  `infrastructure/JsonMessageCatalogue` is the only part that reads a file.
+  What a template *requires* is read from its own copy — every `{name}` in the
+  title or body must arrive in `params` — so a hand-kept list of required
+  parameters can no longer disagree with the words beside it.
+- **An incomplete catalogue fails the start.** `MessageCatalogue.of` refuses a
+  map that is missing any `Template`, and `Main` loads it before the server
+  binds. A template with no copy would otherwise surface as a customer who was
+  never told their order shipped, long after the deploy that caused it.
+
