@@ -20,7 +20,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # Named `test`, not `build`: build-and-push.yml will carry a job called `build` that runs only
+  # on a push to main. Two checks with one name is a required check that can never start.
+  test:
     runs-on: ubuntu-latest
 
     steps:
