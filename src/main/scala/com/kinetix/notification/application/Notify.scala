@@ -8,6 +8,7 @@ import com.kinetix.notification.domain.ports.*
 
 final class Notify[F[_]: Monad](
   catalogue: MessageCatalogue,
+  grants: TemplateGrants,
   directory: RecipientDirectory[F],
   senders: List[NotificationSender[F]],
   repository: NotificationRepository[F],
@@ -18,66 +19,91 @@ final class Notify[F[_]: Monad](
   private val senderFor: Map[Channel, NotificationSender[F]] =
     senders.map(sender => sender.channel -> sender).toMap
 
-  def apply(
-    recipient: PrincipalId,
-    template: Template,
-    params: Map[String, String],
-    preferred: List[Channel],
-    idempotencyKey: Option[IdempotencyKey]
-  ): F[Either[NotificationError, NotifyOutcome]] =
-    Message.render(catalogue, template, params) match
-      case Left(error)    => error.asLeft[NotifyOutcome].pure[F]
-      case Right(message) =>
-        alreadyAccepted(idempotencyKey).flatMap:
-          case Left(error)           => error.asLeft[NotifyOutcome].pure[F]
-          case Right(Some(existing)) => seen(existing).asRight[NotificationError].pure[F]
-          case Right(None)           =>
-            accept(recipient, template, params, preferred, idempotencyKey, message)
+  def apply(command: NotifyCommand): F[Either[NotificationError, NotifyOutcome]] =
+    if !grants.permits(command.sender, command.template) then
+      refuse(NotificationError.TemplateNotGranted(command.sender, command.template))
+    else
+      Message.render(catalogue, command.template, command.params) match
+        case Left(error)    => refuse(error)
+        case Right(message) =>
+          command.idempotencyKey match
+            case None      => accept(command, message)
+            case Some(key) =>
+              repository
+                .findByIdempotencyKey(command.sender, key)
+                .flatMap:
+                  case Left(error)           => refuse(error)
+                  case Right(Some(existing)) => replay(command, key, existing).pure[F]
+                  case Right(None)           => accept(command, message)
 
-  private def alreadyAccepted(
-    key: Option[IdempotencyKey]
-  ): F[Either[NotificationError, Option[Notification]]] =
-    key match
-      case None      => none[Notification].asRight[NotificationError].pure[F]
-      case Some(now) => repository.findByIdempotencyKey(now)
+  private def refuse(error: NotificationError): F[Either[NotificationError, NotifyOutcome]] =
+    error.asLeft[NotifyOutcome].pure[F]
 
-  private def seen(existing: Notification): NotifyOutcome =
-    NotifyOutcome(existing.id, alreadyAccepted = true, existing.attempts)
+  private def replay(
+    command: NotifyCommand,
+    key: IdempotencyKey,
+    existing: Notification
+  ): Either[NotificationError, NotifyOutcome] =
+    if existing.answers(command.recipient, command.template, command.params) then
+      NotifyOutcome(existing.id, alreadyAccepted = true, existing.attempts).asRight
+    else NotificationError.IdempotencyKeyReused(key).asLeft
 
   private def accept(
-    recipient: PrincipalId,
-    template: Template,
-    params: Map[String, String],
-    preferred: List[Channel],
-    idempotencyKey: Option[IdempotencyKey],
+    command: NotifyCommand,
     message: Message
   ): F[Either[NotificationError, NotifyOutcome]] =
     directory
-      .lookup(recipient)
+      .lookup(command.recipient)
       .flatMap:
-        case Left(error)  => error.asLeft[NotifyOutcome].pure[F]
+        case Left(error)  => refuse(error)
         case Right(found) =>
-          chosen(found, preferred) match
-            case Nil =>
-              NotificationError.NoChannelAvailable(recipient).asLeft[NotifyOutcome].pure[F]
+          chosen(found, command.preferred) match
+            case Nil       => refuse(NotificationError.NoChannelAvailable(command.recipient))
             case addresses =>
-              for
-                id <- ids.next
-                createdAt <- time.now
-                record = Notification(
-                  id,
-                  recipient,
-                  template,
-                  params,
-                  idempotencyKey,
-                  Nil,
-                  createdAt
+              record(command).flatMap:
+                case Left(error)                          => refuse(error)
+                case Right((id, Insertion.Inserted))      => deliver(id, addresses, message)
+                case Right((_, Insertion.KeyAlreadyUsed)) => raced(command)
+
+  private def record(
+    command: NotifyCommand
+  ): F[Either[NotificationError, (NotificationId, Insertion)]] =
+    for
+      id <- ids.next
+      createdAt <- time.now
+      notification = Notification(
+        id,
+        command.sender,
+        command.recipient,
+        command.template,
+        command.params,
+        command.idempotencyKey,
+        Nil,
+        createdAt
+      )
+      saved <- repository.save(notification)
+    yield saved.map(insertion => (id, insertion))
+
+  private def raced(command: NotifyCommand): F[Either[NotificationError, NotifyOutcome]] =
+    command.idempotencyKey match
+      case None =>
+        refuse(
+          NotificationError.StoreUnavailable(
+            "a notification with no key was refused as a duplicate"
+          )
+        )
+      case Some(key) =>
+        repository
+          .findByIdempotencyKey(command.sender, key)
+          .map:
+            case Left(error)           => error.asLeft
+            case Right(Some(existing)) => replay(command, key, existing)
+            case Right(None)           =>
+              NotificationError
+                .StoreUnavailable(
+                  "the idempotency key was reported taken, but no notification holds it"
                 )
-                saved <- repository.save(record)
-                outcome <- saved match
-                  case Left(error) => error.asLeft[NotifyOutcome].pure[F]
-                  case Right(())   => deliver(id, addresses, message)
-              yield outcome
+                .asLeft
 
   private def chosen(recipient: Recipient, preferred: List[Channel]): List[Address] =
     val usable = recipient.addresses.filter(address => senderFor.contains(address.channel))

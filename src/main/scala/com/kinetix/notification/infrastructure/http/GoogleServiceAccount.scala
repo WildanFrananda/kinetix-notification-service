@@ -5,17 +5,11 @@ import java.security.{KeyFactory, PrivateKey}
 import java.util.Base64
 
 import cats.effect.IO
-import io.circe.Decoder
 import io.circe.parser.decode
 
 final case class GoogleServiceAccount(clientEmail: String, tokenUri: String, privateKey: PrivateKey)
 
 object GoogleServiceAccount:
-  private final case class Raw(client_email: String, token_uri: String, private_key: String)
-
-  private given Decoder[Raw] =
-    Decoder.forProduct3("client_email", "token_uri", "private_key")(Raw.apply)
-
   def fromBase64(name: String, encoded: String): IO[GoogleServiceAccount] =
     for
       json <- IO
@@ -27,7 +21,7 @@ object GoogleServiceAccount:
             .map(_ => IllegalStateException(s"$name is not base64."))
         )
       raw <- IO.fromEither(
-        decode[Raw](json).left.map(failure =>
+        decode[ServiceAccountKey](json).left.map(failure =>
           IllegalStateException(s"$name does not hold a Google service account key: $failure")
         )
       )

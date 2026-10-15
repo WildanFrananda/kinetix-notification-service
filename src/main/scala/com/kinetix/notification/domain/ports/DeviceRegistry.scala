@@ -12,3 +12,5 @@ trait DeviceRegistry[F[_]]:
   ): F[Either[NotificationError, Boolean]]
 
   def forget(token: DeviceToken): F[Either[NotificationError, Unit]]
+
+  def forgetOwned(principal: PrincipalId, token: DeviceToken): F[Either[NotificationError, Unit]]

@@ -50,11 +50,23 @@ compile:
 test:
   extends: .scala
   stage: test
+  # PostgresStoreSuite runs against this, and fails rather than skips under CI when it is missing.
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: ci
+    POSTGRES_PASSWORD: ci-ephemeral-not-a-deployed-credential
+    POSTGRES_DB: notification_test
+    POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    NOTIFICATION_TEST_DATABASE_URL: jdbc:postgresql://postgres:5432/notification_test
+    NOTIFICATION_TEST_DB_USERNAME: ci
+    NOTIFICATION_TEST_DB_PASSWORD: ci-ephemeral-not-a-deployed-credential
   script:
     - sbt -batch test
     # A suite that discovers nothing is a failed suite.
     - sbt -batch "show Test/definedTests" > tests.txt
-    - grep -q 'NotifySuite' tests.txt || { echo "the suite discovered no NotifySuite"; cat tests.txt; exit 1; }
+    - for suite in NotifySuite PostgresStoreSuite GrpcCallerSuite; do grep -q "$suite" tests.txt || { echo "the suite discovered no $suite"; cat tests.txt; exit 1; }; done
     - sbt -batch assembly
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

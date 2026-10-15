@@ -6,7 +6,7 @@
 # stage holds sbt, coursier's cache and the whole Scala compiler; none of it belongs in the image
 # that runs in production.
 
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:21-jdk@sha256:4d06038800655fe1211760cd561de70ef2ed7a47f5d69255e9834414602b7026 AS build
 
 ARG SBT_VERSION=1.10.7
 
@@ -35,7 +35,11 @@ RUN sbt -batch update
 COPY src src
 RUN sbt -batch assembly
 
-FROM eclipse-temurin:21-jre AS runtime
+FROM eclipse-temurin:21-jre@sha256:d7051a45dd955e4d5d1db4d3f4269fe13d1c6dff8cc6b7ef89fc8577b96c1982 AS runtime
+
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
 
 # Not root. A service that is compromised should not also be the user that can rewrite its own
 # image's filesystem.
@@ -53,7 +57,7 @@ ENV KINETIX_SERVICE_VERSION=${SERVICE_VERSION}
 USER kinetix
 
 # 50051 warehouse, 50052 identity, 50053 matching, 50054 pricing, 50055 order, 50056 payment.
-# 8004 is HTTP: /health, /health/ready and /metrics only. The notification surface is gRPC.
+# 8004 is HTTP: /health, /health/ready, /metrics, and the handset's /api/v1/notifications/devices.
 EXPOSE 50057
 EXPOSE 8004
 

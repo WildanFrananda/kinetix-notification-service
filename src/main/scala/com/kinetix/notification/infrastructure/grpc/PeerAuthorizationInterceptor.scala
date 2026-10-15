@@ -1,34 +1,61 @@
 package com.kinetix.notification.infrastructure.grpc
 
 import io.grpc.*
+import org.slf4j.LoggerFactory
 
-final class PeerAuthorizationInterceptor(allowed: Set[String]) extends ServerInterceptor:
+import com.kinetix.notification.domain.Caller
+
+final class PeerAuthorizationInterceptor(
+  allowed: PeerAllowList,
+  identify: Attributes => Option[Caller]
+) extends ServerInterceptor:
+  private val logger = LoggerFactory.getLogger(classOf[PeerAuthorizationInterceptor])
+
   override def interceptCall[Q, S](
     call: ServerCall[Q, S],
     headers: Metadata,
     next: ServerCallHandler[Q, S]
   ): ServerCall.Listener[Q] =
-    peerName(call) match
-      case Some(peer) if allowed.contains(peer) => next.startCall(call, headers)
-      case Some(peer) => refuse(call, s"'$peer' is not on this service's caller list")
-      case None       => refuse(call, "the caller's certificate names no service")
+    val method = call.getMethodDescriptor.getFullMethodName
 
-  private def peerName[Q, S](call: ServerCall[Q, S]): Option[String] =
-    Option(call.getAttributes.get(Grpc.TRANSPORT_ATTR_SSL_SESSION)).flatMap { session =>
-      scala.util
-        .Try(session.getPeerPrincipal.getName)
-        .toOption
-        .flatMap(commonName)
-    }
+    identify(call.getAttributes) match
+      case None =>
+        logger.warn(s"refused a gRPC call to $method from a peer with no SPIFFE identity")
+        refuse(
+          call,
+          Status.UNAUTHENTICATED,
+          "a client certificate carrying a SPIFFE id is required"
+        )
 
-  private def commonName(distinguishedName: String): Option[String] =
-    distinguishedName
-      .split(',')
-      .map(_.trim)
-      .collectFirst { case part if part.startsWith("CN=") => part.drop(3) }
-      .map(_.trim)
-      .filter(_.nonEmpty)
+      case Some(peer) if allowed.permits(peer, method) =>
+        CallerHeader.stamp(headers, peer)
+        next.startCall(call, headers)
 
-  private def refuse[Q, S](call: ServerCall[Q, S], reason: String): ServerCall.Listener[Q] =
-    call.close(Status.PERMISSION_DENIED.withDescription(reason), Metadata())
+      case Some(peer) if allowed.names(peer) =>
+        logger.warn(
+          s"refused a gRPC call to $method from ${peer.value}, which is not permitted that method"
+        )
+        refuse(call, Status.PERMISSION_DENIED, s"service '${peer.value}' may not call $method")
+
+      case Some(peer) =>
+        logger.warn(
+          s"refused a gRPC call to $method from ${peer.value}, which is not on the allow list"
+        )
+        refuse(call, Status.PERMISSION_DENIED, s"service '${peer.value}' may not call this server")
+
+  private def refuse[Q, S](
+    call: ServerCall[Q, S],
+    status: Status,
+    reason: String
+  ): ServerCall.Listener[Q] =
+    call.close(status.withDescription(reason), Metadata())
     new ServerCall.Listener[Q] {}
+
+object PeerAuthorizationInterceptor:
+  def spiffe(allowed: PeerAllowList): PeerAuthorizationInterceptor =
+    PeerAuthorizationInterceptor(allowed, certificateOf)
+
+  private def certificateOf(attributes: Attributes): Option[Caller] =
+    Option(attributes.get(Grpc.TRANSPORT_ATTR_SSL_SESSION))
+      .flatMap(session => scala.util.Try(SpiffePeer.peerService(session)).toOption.flatten)
+      .flatMap(Caller.fromString)

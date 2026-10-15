@@ -4,11 +4,13 @@ import cats.effect.IO
 import cats.syntax.all.*
 import doobie.*
 import doobie.implicits.*
+import org.typelevel.log4cats.Logger
 
 import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.DeviceRegistry
 
-final class PostgresDeviceRegistry(transactor: Transactor[IO]) extends DeviceRegistry[IO]:
+final class PostgresDeviceRegistry(transactor: Transactor[IO], logger: Logger[IO])
+  extends DeviceRegistry[IO]:
   def tokensFor(principal: PrincipalId): IO[Either[NotificationError, List[DeviceToken]]] =
     val query =
       sql"""
@@ -36,10 +38,12 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO]) extends DeviceReg
         _ <-
           sql"""
             INSERT INTO notification_devices (device_token, principal_id, platform, registered_at)
-            VALUES (${token.value},
-                    ${principal.value},
-                    ${Codecs.platformTo(platform)},
-                    NOW())
+            VALUES (
+              ${token.value},
+              ${principal.value},
+              ${Codecs.platformTo(platform)},
+              NOW()
+            )
             ON CONFLICT (device_token) DO UPDATE
                SET principal_id = EXCLUDED.principal_id,
                    platform = EXCLUDED.platform,
@@ -52,8 +56,21 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO]) extends DeviceReg
   def forget(token: DeviceToken): IO[Either[NotificationError, Unit]] =
     run(sql"DELETE FROM notification_devices WHERE device_token = ${token.value}".update.run.void)
 
+  def forgetOwned(principal: PrincipalId, token: DeviceToken): IO[Either[NotificationError, Unit]] =
+    val query =
+      sql"""
+        DELETE FROM notification_devices
+         WHERE device_token = ${token.value}
+           AND principal_id = ${principal.value}
+      """.update.run.void
+
+    run(query)
+
   private def run[A](query: ConnectionIO[A]): IO[Either[NotificationError, A]] =
     query
       .transact(transactor)
       .map(_.asRight[NotificationError])
-      .handleError(throwable => NotificationError.StoreUnavailable(throwable.getMessage).asLeft[A])
+      .handleErrorWith: failure =>
+        logger
+          .error(failure)("the device registry could not be read or written")
+          .as(NotificationError.StoreUnavailable(PostgresFailure.describe(failure)).asLeft[A])
