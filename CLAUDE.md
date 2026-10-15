@@ -220,6 +220,11 @@ The rules are not advice here; several of them fail the build.
   failures" the same observation, and the estate's deploy gate greps for a sample line, not
   a `# TYPE` header. The gRPC method names come off the bound service descriptor, so a
   method renamed in the contract cannot leave a counter behind under its old name.
+- **The image carries its commit as its version.** `kinetix_build_info` reads `KINETIX_SERVICE_VERSION`,
+  baked from the Dockerfile's `SERVICE_VERSION` argument, and `build-and-push.yml` passes the commit sha,
+  as the notary does. It did not at first — the workflow was copied from search, which serves no
+  `/metrics` — so v1.0.1 reported `version="unknown"`, `metrics_conformance` refused it, and the deploy
+  rolled back. The workflow now fails before pushing if the image does not carry its own sha.
 - **Every metric label is bounded by construction.** A route label is one of
   `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. Only
   `HttpApi.Probes` are seeded at start; the device routes appear once a handset uses them. An id in
