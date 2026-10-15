@@ -82,3 +82,13 @@ jobs:
 
       - name: The jar must assemble
         run: sbt -batch assembly
+
+      - name: The jar must name the class java -jar starts
+        run: |
+          cd "$(mktemp -d)"
+          jar xf "$GITHUB_WORKSPACE/target/scala-3.3.4/kinetix-notification-service.jar" META-INF/MANIFEST.MF
+          grep -q '^Main-Class: com.kinetix.notification.Main' META-INF/MANIFEST.MF || {
+            echo "the jar names no Main-Class, so the image's java -jar exits at once"
+            cat META-INF/MANIFEST.MF
+            exit 1
+          }

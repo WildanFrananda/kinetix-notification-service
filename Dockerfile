@@ -33,7 +33,10 @@ COPY build.sbt VERSION ./
 RUN sbt -batch update
 
 COPY src src
-RUN sbt -batch assembly
+RUN sbt -batch assembly \
+ && cd /tmp \
+ && jar xf /build/target/scala-3.3.4/kinetix-notification-service.jar META-INF/MANIFEST.MF \
+ && grep -q '^Main-Class: com.kinetix.notification.Main' META-INF/MANIFEST.MF
 
 FROM eclipse-temurin:21-jre@sha256:d7051a45dd955e4d5d1db4d3f4269fe13d1c6dff8cc6b7ef89fc8577b96c1982 AS runtime
 

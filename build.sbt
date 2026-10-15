@@ -60,6 +60,9 @@ lazy val root = (project in file("."))
     Test / fork := true,
     run / fork := true,
 
+    Compile / mainClass := Some("com.kinetix.notification.Main"),
+    assembly / mainClass := Some("com.kinetix.notification.Main"),
+
     assembly / assemblyJarName := "kinetix-notification-service.jar",
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "services", _*)     => MergeStrategy.concat
