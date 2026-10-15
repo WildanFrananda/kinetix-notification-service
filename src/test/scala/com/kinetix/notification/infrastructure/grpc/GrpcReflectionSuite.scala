@@ -8,8 +8,7 @@ import scala.jdk.CollectionConverters.*
 import cats.effect.{IO, Resource}
 import fs2.grpc.syntax.all.*
 import io.grpc.ManagedChannel
-import io.grpc.netty.shaded.io.grpc.netty.{NettyChannelBuilder, NettyServerBuilder}
-import io.grpc.protobuf.services.ProtoReflectionServiceV1
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.reflection.v1.{
   ServerReflectionGrpc,
   ServerReflectionRequest,
@@ -17,42 +16,11 @@ import io.grpc.reflection.v1.{
 }
 import io.grpc.stub.StreamObserver
 import munit.CatsEffectSuite
-import notification.v1.notification.NotificationServiceFs2Grpc
 
-import com.kinetix.notification.application.{ForgetDevice, GetDelivery, Notify, RegisterDevice}
-import com.kinetix.notification.domain.Channel
-import com.kinetix.notification.fakes.*
+import com.kinetix.notification.domain.Caller
 
 class GrpcReflectionSuite extends CatsEffectSuite:
-  private val served: Resource[IO, Int] =
-    for
-      directory <- Resource.eval(FakeDirectory.holding(Fixtures.email))
-      sender <- Resource.eval(FakeSender.working(Channel.Email))
-      repository <- Resource.eval(FakeRepository.empty)
-      devices <- Resource.eval(FakeDeviceRegistry.empty)
-      retry <- Resource.eval(CountingRetry.upTo(1))
-      handler = GrpcNotificationServer(
-        Notify[IO](
-          Fixtures.catalogue,
-          directory,
-          List(sender),
-          repository,
-          retry,
-          FixedTime(Fixtures.at),
-          FixedIds(Fixtures.notificationId)
-        ),
-        GetDelivery[IO](repository),
-        RegisterDevice[IO](devices),
-        ForgetDevice[IO](devices)
-      )
-      service <- NotificationServiceFs2Grpc.bindServiceResource[IO](handler)
-      server <- NettyServerBuilder
-        .forPort(0)
-        .addService(service)
-        .addService(ProtoReflectionServiceV1.newInstance())
-        .resource[IO]
-        .evalMap(running => IO(running.start()))
-    yield server.getPort
+  private val served: Resource[IO, Int] = Served.start(None).map(_.port)
 
   private def channel(port: Int): Resource[IO, ManagedChannel] =
     NettyChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().resource[IO]
@@ -96,5 +64,21 @@ class GrpcReflectionSuite extends CatsEffectSuite:
         assert(
           services.exists(_.contains("ServerReflection")),
           s"reflection is not on its own list: $services"
+        )
+  }
+
+  test("reflection answers any verified peer, even when the list grants nobody") {
+    val nobody = PeerAllowList.parse("TEST", "").toOption.get
+    val order = Caller.fromString("order")
+
+    Served
+      .start(Some(PeerAuthorizationInterceptor(nobody, _ => order)))
+      .map(_.port)
+      .flatMap(channel)
+      .use(listServices)
+      .map: services =>
+        assert(
+          services.contains("notification.v1.NotificationService"),
+          s"reflection was refused to a verified peer: $services"
         )
   }

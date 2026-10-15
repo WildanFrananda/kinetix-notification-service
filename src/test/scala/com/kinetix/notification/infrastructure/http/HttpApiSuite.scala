@@ -2,7 +2,7 @@ package com.kinetix.notification.infrastructure.http
 
 import cats.effect.IO
 import munit.CatsEffectSuite
-import org.http4s.{Method, Request, Status, Uri}
+import org.http4s.{HttpRoutes, Method, Request, Status, Uri}
 
 import com.kinetix.notification.infrastructure.observability.Metrics
 
@@ -14,7 +14,7 @@ class HttpApiSuite extends CatsEffectSuite:
   test("liveness answers while the database is gone") {
     for
       recorder <- metrics
-      app = HttpApi(recorder, IO.pure(false))
+      app = HttpApi(recorder, IO.pure(false), HttpRoutes.empty[IO])
       response <- app.run(get("/health"))
     yield assertEquals(response.status, Status.Ok)
   }
@@ -22,7 +22,7 @@ class HttpApiSuite extends CatsEffectSuite:
   test("readiness answers 200 only when the database answered") {
     for
       recorder <- metrics
-      app = HttpApi(recorder, IO.pure(true))
+      app = HttpApi(recorder, IO.pure(true), HttpRoutes.empty[IO])
       response <- app.run(get("/health/ready"))
     yield assertEquals(response.status, Status.Ok)
   }
@@ -30,7 +30,7 @@ class HttpApiSuite extends CatsEffectSuite:
   test("a database that did not answer makes the container unhealthy, not merely quiet") {
     for
       recorder <- metrics
-      app = HttpApi(recorder, IO.pure(false))
+      app = HttpApi(recorder, IO.pure(false), HttpRoutes.empty[IO])
       response <- app.run(get("/health/ready"))
       body <- response.as[String]
     yield
@@ -41,7 +41,7 @@ class HttpApiSuite extends CatsEffectSuite:
   test("/metrics is served as Prometheus text, not as JSON") {
     for
       recorder <- metrics
-      app = HttpApi(recorder, IO.pure(true))
+      app = HttpApi(recorder, IO.pure(true), HttpRoutes.empty[IO])
       response <- app.run(get("/metrics"))
       body <- response.as[String]
     yield
@@ -57,12 +57,13 @@ class HttpApiSuite extends CatsEffectSuite:
     assertEquals(HttpApi.route(get("/orders/8f3a2b1c")), HttpApi.Unmatched)
     assertEquals(HttpApi.route(get("/orders/99999")), HttpApi.Unmatched)
     assertEquals(HttpApi.route(get("/health/ready")), HttpApi.Ready)
+    assertEquals(HttpApi.route(get(DeviceApi.Path)), DeviceApi.Path)
   }
 
   test("a served request is counted under its own template") {
     for
       recorder <- metrics
-      counted = HttpMetrics(recorder, HttpApi(recorder, IO.pure(true)))
+      counted = HttpMetrics(recorder, HttpApi(recorder, IO.pure(true), HttpRoutes.empty[IO]))
       _ <- counted.run(get("/health"))
       _ <- counted.run(get("/nothing/here"))
       body <- recorder.scrape

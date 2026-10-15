@@ -4,6 +4,7 @@ import java.time.Instant
 
 final case class Notification(
   id: NotificationId,
+  sender: Caller,
   recipient: PrincipalId,
   template: Template,
   params: Map[String, String],
@@ -15,3 +16,10 @@ final case class Notification(
 
   def attemptOn(channel: Channel): Option[DeliveryAttempt] =
     attempts.find(_.channel == channel)
+
+  def answers(
+    recipient: PrincipalId,
+    template: Template,
+    params: Map[String, String]
+  ): Boolean =
+    this.recipient == recipient && this.template == template && this.params == params

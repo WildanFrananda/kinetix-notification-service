@@ -12,16 +12,19 @@ class NotifySuite extends CatsEffectSuite:
     directory: RecipientDirectory[IO],
     senders: List[NotificationSender[IO]],
     repository: NotificationRepository[IO],
-    retry: RetryPolicy[IO]
+    retry: RetryPolicy[IO],
+    grants: TemplateGrants = Fixtures.everything,
+    ids: NotificationIdSource[IO] = FixedIds(Fixtures.notificationId)
   ): Notify[IO] =
     Notify[IO](
       Fixtures.catalogue,
+      grants,
       directory,
       senders,
       repository,
       retry,
       FixedTime(Fixtures.at),
-      FixedIds(Fixtures.notificationId)
+      ids
     )
 
   test("a missing parameter is refused before the recipient is even looked up") {
@@ -31,11 +34,7 @@ class NotifySuite extends CatsEffectSuite:
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
       result <- notify(directory, List(sender), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Map.empty,
-        Nil,
-        None
+        Fixtures.packed(params = Map.empty)
       )
       asked <- directory.asked.get
       stored <- repository.contents
@@ -57,13 +56,7 @@ class NotifySuite extends CatsEffectSuite:
       push <- FakeSender.working(Channel.Push)
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email, push), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email, push), repository, retry)(Fixtures.packed())
       emailSent <- email.sent.get
       pushSent <- push.sent.get
     yield
@@ -84,11 +77,7 @@ class NotifySuite extends CatsEffectSuite:
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
       _ <- notify(directory, List(email, push), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        List(Channel.Push),
-        None
+        Fixtures.packed(preferred = List(Channel.Push))
       )
       emailSent <- email.sent.get
       pushSent <- push.sent.get
@@ -105,11 +94,7 @@ class NotifySuite extends CatsEffectSuite:
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
       result <- notify(directory, List(email, push), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        List(Channel.Push),
-        None
+        Fixtures.packed(preferred = List(Channel.Push))
       )
       pushSent <- push.sent.get
     yield
@@ -123,13 +108,7 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.working(Channel.Email)
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       stored <- repository.contents
     yield
       assertEquals(result, Left(NotificationError.NoChannelAvailable(Fixtures.recipient)))
@@ -142,13 +121,7 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.working(Channel.Email)
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      _ <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      _ <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       saves <- repository.saves.get
       stored <- repository.contents
     yield
@@ -165,8 +138,8 @@ class NotifySuite extends CatsEffectSuite:
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
       use = notify(directory, List(email), repository, retry)
-      first <- use(Fixtures.recipient, Template.OrderPacked, Fixtures.orderParams, Nil, Some(key))
-      second <- use(Fixtures.recipient, Template.OrderPacked, Fixtures.orderParams, Nil, Some(key))
+      first <- use(Fixtures.packed(key = Some(key)))
+      second <- use(Fixtures.packed(key = Some(key)))
       sent <- email.sent.get
       stored <- repository.contents
     yield
@@ -185,13 +158,7 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.answering(Channel.Email, List(Left(rejected)))
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       stored <- repository.contents
     yield
       assert(result.isRight, "the notification was accepted even though the send failed")
@@ -208,13 +175,7 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.answering(Channel.Email, List(Left(rejected), Right(())))
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      _ <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      _ <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       sent <- email.sent.get
     yield assertEquals(sent.length, 1, "a rejection must not be tried again")
   }
@@ -230,13 +191,7 @@ class NotifySuite extends CatsEffectSuite:
       )
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       sent <- email.sent.get
     yield
       assertEquals(sent.length, 3)
@@ -251,13 +206,7 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.working(Channel.Email)
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed())
       sent <- email.sent.get
       stored <- repository.contents
     yield
@@ -272,12 +221,140 @@ class NotifySuite extends CatsEffectSuite:
       email <- FakeSender.working(Channel.Email)
       repository <- FakeRepository.empty
       retry <- CountingRetry.upTo(3)
-      result <- notify(directory, List(email), repository, retry)(
-        Fixtures.recipient,
-        Template.OrderPacked,
-        Fixtures.orderParams,
-        Nil,
-        None
-      )
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed())
     yield assertEquals(result, Left(NotificationError.NoChannelAvailable(Fixtures.recipient)))
+  }
+
+  test("a template the caller is not granted is refused before anything is read") {
+    val onlyPaid = TemplateGrants(Map(Fixtures.sender -> Set(Template.OrderPaid)))
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(email), repository, retry, grants = onlyPaid)(
+        Fixtures.packed()
+      )
+      asked <- directory.asked.get
+      stored <- repository.contents
+      sent <- email.sent.get
+    yield
+      assertEquals(
+        result,
+        Left(NotificationError.TemplateNotGranted(Fixtures.sender, Template.OrderPacked))
+      )
+      assertEquals(asked, Nil)
+      assertEquals(stored, Nil)
+      assertEquals(sent, Nil)
+  }
+
+  test("a caller with no grants at all may send nothing") {
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(email), repository, retry, grants = TemplateGrants.none)(
+        Fixtures.packed()
+      )
+      sent <- email.sent.get
+    yield
+      assertEquals(
+        result,
+        Left(NotificationError.TemplateNotGranted(Fixtures.sender, Template.OrderPacked))
+      )
+      assertEquals(sent, Nil)
+  }
+
+  test("the same key with a different request is refused, not answered with the first") {
+    val key = IdempotencyKey.fromString("NOTIFY-ONCE").get
+    val other = Map("order_number" -> "ORD-20260921-OTHER000")
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      use = notify(directory, List(email), repository, retry)
+      first <- use(Fixtures.packed(key = Some(key)))
+      second <- use(Fixtures.packed(key = Some(key), params = other))
+      sent <- email.sent.get
+    yield
+      assertEquals(first.map(_.alreadyAccepted), Right(false))
+      assertEquals(second, Left(NotificationError.IdempotencyKeyReused(key)))
+      assertEquals(sent.length, 1)
+  }
+
+  test("a key belongs to the service that sent it") {
+    val key = IdempotencyKey.fromString("NOTIFY-ONCE").get
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      ids <- SequentialIds.start
+      use = notify(directory, List(email), repository, retry, ids = ids)
+      ours <- use(Fixtures.packed(key = Some(key)))
+      theirs <- use(Fixtures.packed(key = Some(key), from = Fixtures.otherSender))
+      sent <- email.sent.get
+      stored <- repository.contents
+    yield
+      assertEquals(ours.map(_.alreadyAccepted), Right(false))
+      assertEquals(theirs.map(_.alreadyAccepted), Right(false))
+      assertNotEquals(ours.map(_.id), theirs.map(_.id))
+      assertEquals(sent.length, 2, "another service's key must not swallow this one's message")
+      assertEquals(stored.map(_.sender).toSet, Set(Fixtures.sender, Fixtures.otherSender))
+  }
+
+  test("losing the race for a key answers with the notification that won it") {
+    val key = IdempotencyKey.fromString("NOTIFY-ONCE").get
+    val winner = Notification(
+      NotificationId.fromString("NTF-WINNER").get,
+      Fixtures.sender,
+      Fixtures.recipient,
+      Template.OrderPacked,
+      Fixtures.orderParams,
+      Some(key),
+      Nil,
+      Fixtures.at
+    )
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- RacingRepository.losingTo(winner)
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed(key = Some(key)))
+      sent <- email.sent.get
+    yield
+      assertEquals(result.map(_.id), Right(winner.id))
+      assertEquals(result.map(_.alreadyAccepted), Right(true))
+      assertEquals(sent, Nil, "the loser must not send what the winner is sending")
+  }
+
+  test("losing the race to a different request is refused") {
+    val key = IdempotencyKey.fromString("NOTIFY-ONCE").get
+    val winner = Notification(
+      NotificationId.fromString("NTF-WINNER").get,
+      Fixtures.sender,
+      Fixtures.recipient,
+      Template.OrderPaid,
+      Fixtures.orderParams,
+      Some(key),
+      Nil,
+      Fixtures.at
+    )
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email)
+      email <- FakeSender.working(Channel.Email)
+      repository <- RacingRepository.losingTo(winner)
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(email), repository, retry)(Fixtures.packed(key = Some(key)))
+      sent <- email.sent.get
+    yield
+      assertEquals(result, Left(NotificationError.IdempotencyKeyReused(key)))
+      assertEquals(sent, Nil)
   }

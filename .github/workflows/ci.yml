@@ -25,6 +25,26 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # PostgresStoreSuite runs against this. Under CI it fails rather than skips when the database is
+    # missing: the idempotency constraint and the jsonb cast live only in Postgres, and a fake
+    # repository passed for a month while every real insert failed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-ephemeral-not-a-deployed-credential
+          POSTGRES_DB: notification_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U ci -d notification_test"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+
+    env:
+      NOTIFICATION_TEST_DATABASE_URL: jdbc:postgresql://localhost:5432/notification_test
+      NOTIFICATION_TEST_DB_USERNAME: ci
+      NOTIFICATION_TEST_DB_PASSWORD: ci-ephemeral-not-a-deployed-credential
+
     steps:
       - uses: actions/checkout@v6
 
@@ -52,11 +72,13 @@ jobs:
       - name: The suite must have run something
         run: |
           sbt -batch "show Test/definedTests" > tests.txt
-          grep -q 'NotifySuite' tests.txt || {
-            echo "the test suite discovered no NotifySuite; the tests did not run"
-            cat tests.txt
-            exit 1
-          }
+          for suite in NotifySuite PostgresStoreSuite GrpcCallerSuite; do
+            grep -q "$suite" tests.txt || {
+              echo "the test suite discovered no $suite; the tests did not run"
+              cat tests.txt
+              exit 1
+            }
+          done
 
       - name: The jar must assemble
         run: sbt -batch assembly

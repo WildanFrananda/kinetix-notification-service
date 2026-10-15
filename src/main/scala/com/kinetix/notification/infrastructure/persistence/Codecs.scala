@@ -13,22 +13,23 @@ private[persistence] object Codecs:
     case Template.CourierOffer    => "COURIER_OFFER"
     case Template.ReturnOpened    => "RETURN_OPENED"
 
-  def templateFrom(raw: String): Template = raw match
-    case "ORDER_PAID"       => Template.OrderPaid
-    case "ORDER_PACKED"     => Template.OrderPacked
-    case "COURIER_ASSIGNED" => Template.CourierAssigned
-    case "ORDER_DELIVERED"  => Template.OrderDelivered
-    case "COURIER_OFFER"    => Template.CourierOffer
-    case "RETURN_OPENED"    => Template.ReturnOpened
-    case _                  => Template.OrderPaid
+  def templateFrom(raw: String): Option[Template] = raw match
+    case "ORDER_PAID"       => Some(Template.OrderPaid)
+    case "ORDER_PACKED"     => Some(Template.OrderPacked)
+    case "COURIER_ASSIGNED" => Some(Template.CourierAssigned)
+    case "ORDER_DELIVERED"  => Some(Template.OrderDelivered)
+    case "COURIER_OFFER"    => Some(Template.CourierOffer)
+    case "RETURN_OPENED"    => Some(Template.ReturnOpened)
+    case _                  => None
 
   def channelTo(channel: Channel): String = channel match
     case Channel.Push  => "PUSH"
     case Channel.Email => "EMAIL"
 
-  def channelFrom(raw: String): Channel = raw match
-    case "EMAIL" => Channel.Email
-    case _       => Channel.Push
+  def channelFrom(raw: String): Option[Channel] = raw match
+    case "PUSH"  => Some(Channel.Push)
+    case "EMAIL" => Some(Channel.Email)
+    case _       => None
 
   def statusTo(status: DeliveryStatus): String = status match
     case DeliveryStatus.Pending     => "PENDING"
@@ -36,22 +37,19 @@ private[persistence] object Codecs:
     case DeliveryStatus.Failed      => "FAILED"
     case DeliveryStatus.Unreachable => "UNREACHABLE"
 
-  def statusFrom(raw: String): DeliveryStatus = raw match
-    case "SENT"        => DeliveryStatus.Sent
-    case "FAILED"      => DeliveryStatus.Failed
-    case "UNREACHABLE" => DeliveryStatus.Unreachable
-    case _             => DeliveryStatus.Pending
+  def statusFrom(raw: String): Option[DeliveryStatus] = raw match
+    case "PENDING"     => Some(DeliveryStatus.Pending)
+    case "SENT"        => Some(DeliveryStatus.Sent)
+    case "FAILED"      => Some(DeliveryStatus.Failed)
+    case "UNREACHABLE" => Some(DeliveryStatus.Unreachable)
+    case _             => None
 
   def platformTo(platform: DevicePlatform): String = platform match
     case DevicePlatform.Android => "ANDROID"
     case DevicePlatform.Ios     => "IOS"
 
-  def platformFrom(raw: String): DevicePlatform = raw match
-    case "IOS" => DevicePlatform.Ios
-    case _     => DevicePlatform.Android
-
   def paramsTo(params: Map[String, String]): String =
     Encoder[Map[String, String]].apply(params).noSpaces
 
-  def paramsFrom(raw: String): Map[String, String] =
-    parser.decode[Map[String, String]](raw).getOrElse(Map.empty)
+  def paramsFrom(raw: String): Option[Map[String, String]] =
+    parser.decode[Map[String, String]](raw).toOption

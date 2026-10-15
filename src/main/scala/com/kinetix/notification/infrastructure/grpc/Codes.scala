@@ -2,11 +2,14 @@ package com.kinetix.notification.infrastructure.grpc
 
 import com.kinetix.notification.domain.NotificationError
 
-private[grpc] object Codes:
+private[infrastructure] object Codes:
   def of(error: NotificationError): String = error match
     case NotificationError.NoRecipient                => "NO_RECIPIENT"
     case NotificationError.NoTemplate                 => "NO_TEMPLATE"
+    case NotificationError.TemplateNotGranted(_, _)   => "TEMPLATE_NOT_GRANTED"
     case NotificationError.TemplateParamMissing(_, _) => "TEMPLATE_PARAM_MISSING"
+    case NotificationError.InvalidIdempotencyKey      => "INVALID_IDEMPOTENCY_KEY"
+    case NotificationError.IdempotencyKeyReused(_)    => "IDEMPOTENCY_KEY_REUSED"
     case NotificationError.RecipientUnknown(_)        => "RECIPIENT_UNKNOWN"
     case NotificationError.DirectoryUnavailable(_)    => "DIRECTORY_UNAVAILABLE"
     case NotificationError.NoChannelAvailable(_)      => "NO_CHANNEL_AVAILABLE"
@@ -14,3 +17,4 @@ private[grpc] object Codes:
     case NotificationError.SenderUnavailable(_, _)    => "SENDER_UNAVAILABLE"
     case NotificationError.StoreUnavailable(_)        => "STORE_UNAVAILABLE"
     case NotificationError.InvalidDeviceToken         => "INVALID_DEVICE_TOKEN"
+    case NotificationError.InvalidPlatform            => "INVALID_PLATFORM"

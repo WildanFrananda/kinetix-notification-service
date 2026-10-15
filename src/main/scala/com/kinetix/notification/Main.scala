@@ -13,12 +13,14 @@ import io.grpc.protobuf.services.ProtoReflectionServiceV1
 import org.http4s.Uri
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import identity.v1.identity.{IdentityServiceFs2Grpc, IdentityServiceGrpc}
 import notification.v1.notification.NotificationServiceFs2Grpc
 
 import com.kinetix.notification.application.*
-import com.kinetix.notification.domain.EmailAddress
+import com.kinetix.notification.domain.{Caller, EmailAddress}
 import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.infrastructure.{
   JsonMessageCatalogue,
@@ -29,12 +31,14 @@ import com.kinetix.notification.infrastructure.{
 import com.kinetix.notification.infrastructure.config.Settings
 import com.kinetix.notification.infrastructure.grpc.*
 import com.kinetix.notification.infrastructure.http.{
+  DeviceApi,
   GoogleAccessTokens,
   GoogleServiceAccount,
   HttpApi,
   HttpEmailSender,
   HttpMetrics,
-  HttpPushSender
+  HttpPushSender,
+  NimbusAccessTokenVerifier
 }
 import com.kinetix.notification.infrastructure.observability.{MetricKey, Metrics}
 import com.kinetix.notification.infrastructure.persistence.{
@@ -55,13 +59,22 @@ object Main extends IOApp:
     for
       dispatcher <- Dispatcher.parallel[IO]
       metrics <- Resource.eval(Metrics.create(Main.ServiceName, Main.version))
+      logger: Logger[IO] = Slf4jLogger.getLoggerFromName[IO](Main.ServiceName)
 
       transactor <- database(settings)
       httpClient <- EmberClientBuilder.default[IO].build
       identity <- identityClient(settings, metrics, dispatcher)
 
-      repository: NotificationRepository[IO] = PostgresNotificationRepository(transactor)
-      devices: DeviceRegistry[IO] = PostgresDeviceRegistry(transactor)
+      repository: NotificationRepository[IO] = PostgresNotificationRepository(transactor, logger)
+      devices: DeviceRegistry[IO] = PostgresDeviceRegistry(transactor, logger)
+
+      accessTokens <- Resource.eval(
+        NimbusAccessTokenVerifier.remote(
+          settings.identityJwksUrl,
+          settings.jwtIssuer,
+          settings.jwtAudience
+        )
+      )
 
       emailFrom <- Resource.eval(
         IO.fromOption(EmailAddress.fromString(settings.emailFromAddress))(
@@ -97,19 +110,37 @@ object Main extends IOApp:
       time: TimeSource[IO] = SystemTimeSource()
       ids: NotificationIdSource[IO] = RandomNotificationIdSource()
 
-      notify = Notify[IO](catalogue, directory, senders, repository, retry, time, ids)
+      notify = Notify[IO](
+        catalogue,
+        settings.templateGrants,
+        directory,
+        senders,
+        repository,
+        retry,
+        time,
+        ids
+      )
       getDelivery = GetDelivery[IO](repository)
       registerDevice = RegisterDevice[IO](devices)
       forgetDevice = ForgetDevice[IO](devices)
+      forgetOwnDevice = ForgetOwnDevice[IO](devices)
 
-      service <- NotificationServiceFs2Grpc.bindServiceResource[IO](
-        GrpcNotificationServer(notify, getDelivery, registerDevice, forgetDevice)
+      service <- NotificationServiceFs2Grpc.serviceResource[IO, Caller](
+        GrpcNotificationServer(notify, getDelivery, registerDevice, forgetDevice),
+        CallerHeader.read
+      )
+      _ <- Resource.eval(grantsNameWhatIsServed(settings, service.getServiceDescriptor))
+      _ <- Resource.eval(
+        logger.info(
+          s"gRPC callers: ${settings.allowedPeers.summary}; " +
+            s"templates: ${TemplateGrantList.summary(settings.templateGrants)}"
+        )
       )
       serverTls <- Resource.eval(ServiceIdentity.server(settings.pkiDir))
       _ <- NettyServerBuilder
         .forPort(settings.grpcPort)
         .sslContext(serverTls)
-        .intercept(PeerAuthorizationInterceptor(settings.allowedPeers))
+        .intercept(PeerAuthorizationInterceptor.spiffe(settings.allowedPeers))
         .intercept(ServerMetricsInterceptor(metrics, dispatcher))
         .addService(service)
         .addService(ProtoReflectionServiceV1.newInstance())
@@ -122,6 +153,8 @@ object Main extends IOApp:
         )
       )
 
+      devicesApi = DeviceApi(accessTokens, registerDevice, forgetOwnDevice, logger)
+
       httpPort <- Resource.eval(
         IO.fromOption(Port.fromInt(settings.httpPort))(
           IllegalStateException(s"HTTP_PORT is ${settings.httpPort}, which is not a port number.")
@@ -131,12 +164,17 @@ object Main extends IOApp:
         .default[IO]
         .withHost(ipv4"0.0.0.0")
         .withPort(httpPort)
-        .withHttpApp(HttpMetrics(metrics, HttpApi(metrics, PostgresReadiness.check(transactor))))
+        .withHttpApp(
+          HttpMetrics(
+            metrics,
+            HttpApi(metrics, PostgresReadiness.check(transactor), devicesApi)
+          )
+        )
         .build
     yield ()
 
   private def seeds(grpcMethods: List[String]): List[MetricKey] =
-    val http = HttpApi.Routes.flatMap: route =>
+    val http = HttpApi.Probes.flatMap: route =>
       List(
         MetricKey(
           Metrics.HttpRequests,
@@ -157,6 +195,20 @@ object Main extends IOApp:
       )
     )
     http ++ served ++ called
+
+  private def grantsNameWhatIsServed(
+    settings: Settings,
+    served: io.grpc.ServiceDescriptor
+  ): IO[Unit] =
+    val names = served.getMethods.asScala.map(_.getFullMethodName).toSet + served.getName
+    val unknown = settings.allowedPeers.unknownScopes(names)
+
+    IO.raiseUnless(unknown.isEmpty)(
+      IllegalStateException(
+        s"${Settings.AllowedPeers} grants ${unknown.mkString(", ")}, which this server does not " +
+          s"serve; it serves ${names.toList.sorted.mkString(", ")}."
+      )
+    )
 
   private def database(settings: Settings): Resource[IO, HikariTransactor[IO]] =
     HikariTransactor.newHikariTransactor[IO](

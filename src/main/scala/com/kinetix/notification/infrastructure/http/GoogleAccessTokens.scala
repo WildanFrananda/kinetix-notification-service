@@ -8,9 +8,7 @@ import java.util.Base64
 import scala.concurrent.duration.*
 
 import cats.effect.{Clock, IO, Ref}
-import io.circe.Decoder
 import org.http4s.*
-import org.http4s.circe.*
 import org.http4s.client.Client
 
 final class GoogleAccessTokens private (
@@ -36,14 +34,14 @@ final class GoogleAccessTokens private (
       )
     yield granted.access_token
 
-  private def exchange(now: Instant): IO[GoogleAccessTokens.Granted] =
+  private def exchange(now: Instant): IO[GrantedToken] =
     val tokenUri = Uri.unsafeFromString(account.tokenUri)
     val form = UrlForm(
       "grant_type" -> "urn:ietf:params:oauth:grant-type:jwt-bearer",
       "assertion" -> assertion(now)
     )
 
-    client.expect[GoogleAccessTokens.Granted](Request[IO](Method.POST, tokenUri).withEntity(form))
+    client.expect[GrantedToken](Request[IO](Method.POST, tokenUri).withEntity(form))
 
   private def assertion(now: Instant): String =
     val issued = now.getEpochSecond
@@ -66,13 +64,6 @@ object GoogleAccessTokens:
   val MessagingScope: String = "https://www.googleapis.com/auth/firebase.messaging"
 
   val Margin: FiniteDuration = 60.seconds
-
-  private[http] final case class Granted(access_token: String, expires_in: Int)
-
-  private[http] given Decoder[Granted] =
-    Decoder.forProduct2("access_token", "expires_in")(Granted.apply)
-
-  private[http] given EntityDecoder[IO, Granted] = jsonOf[IO, Granted]
 
   def create(
     client: Client[IO],

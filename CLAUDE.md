@@ -164,10 +164,53 @@ The rules are not advice here; several of them fail the build.
   client makes the exchange, so the token cache is a `Ref` with no background thread and no
   second HTTP stack in the image.
 
-- **The HTTP port serves three things and no business.** `/health`, `/health/ready` and
-  `/metrics`. Everything a caller wants from this service is gRPC behind mTLS; the HTTP
-  listener exists so a container orchestrator and a scraper can do their jobs without
-  holding a client certificate.
+- **The HTTP port serves the probes, the scrape, and the handset.** `/health`, `/health/ready` and
+  `/metrics` need no credential so an orchestrator and a scraper can do their jobs.
+  `POST` and `DELETE /api/v1/notifications/devices` are the one piece of business here, because
+  the caller is a phone, not a service: it has no mesh certificate and reaches the estate only
+  through Kong. A device is registered to the principal identity's access token names (`sub`),
+  verified here against identity's JWKS with issuer, audience and `token_use: access` — Kong's own
+  check is a second lock, not the only one. The body never names a principal; one that tries is
+  ignored. A handset can forget only its own token. The body is read up to 4 KiB and no further.
+- **Signing keys that cannot be fetched are a 503, not a 401.** "Your token is bad" and "identity
+  did not answer" are different facts; reporting the second as the first sends a logged-in user to
+  log in again. `TokenVerdict.Unverifiable` carries it, from nimbus's `KeySourceException`.
+- **nimbus-jose-jwt verifies tokens, and nothing else is hand-rolled.** Algorithm pinning (RS256
+  only, so `none` and HS256-over-the-public-key are refused), key rotation by `kid`, and claim
+  checks are where hand-written JWT code goes wrong. Its JWKS fetcher uses the JDK's own
+  `HttpURLConnection`, so it brings no second HTTP library.
+
+- **gRPC callers are granted per RPC, and templates per caller.** `KINETIX_GRPC_ALLOWED_PEERS` reads
+  `peer`, `peer@package.Service` or `peer@package.Service/Method`, as order and identity read it.
+  The list used to name services only, so any of them could register its own handset under any
+  principal and receive their order and AWB numbers. `KINETIX_NOTIFICATION_TEMPLATE_GRANTS`
+  (`order:TEMPLATE_ORDER_PAID`) says which templates a caller may send: without it, any caller
+  allowed `Notify` could tell a buyer their order was paid. Both must be set even when empty — an
+  empty value grants nobody, an unset one is a deploy that forgot it — and a grant naming a method
+  this server does not serve stops the start, because a typo there grants nothing silently.
+  Reflection is open to any verified peer: it describes a contract that is public anyway.
+- **The caller is the certificate's, and reaches the handler as a value.** The interceptor writes the
+  verified peer into `x-kinetix-verified-caller` after discarding whatever the client sent under that
+  name, and fs2-grpc's context function turns it into a `Caller`. A handler never reads a caller from
+  the request.
+- **An idempotency key belongs to the service that sent it.** The unique constraint is
+  `(sender, idempotency_key)`; a replay is answered only when recipient, template and parameters
+  match, and otherwise refused as `IDEMPOTENCY_KEY_REUSED` rather than answered with somebody
+  else's notification. The insert is `ON CONFLICT DO NOTHING`, so the loser of two simultaneous
+  first calls reads the winner instead of reporting `STORE_UNAVAILABLE` for a notification that
+  exists. `GetDelivery` shows a service only what it sent.
+- **A row this service cannot read is a failure, never a guess.** The codecs once read an unknown
+  template as `ORDER_PAID`, an unknown channel as push and unreadable parameters as none. They now
+  refuse, the read is `STORE_UNAVAILABLE`, and the table's CHECK constraints name every template.
+- **`params` is cast to `jsonb` in the insert.** Without the cast Postgres refuses the varchar the
+  driver sends — every `Notify` on the code before this failed that way, and the fake repository
+  could not see it. `PostgresStoreSuite` runs against a real Postgres 16 in both CIs and fails,
+  rather than skips, when CI has no database; on a laptop it is reported as ignored unless
+  `NOTIFICATION_TEST_DATABASE_URL` names a database with `test` in its name, because it truncates.
+- **A store failure says so, and only in the log says why.** The driver's message is logged at ERROR
+  and kept out of what a caller receives; `GetDelivery` answers `UNAVAILABLE` when the store did
+  not answer, instead of `found = false`.
+
 - **Readiness asks the database a real question.** A process that has bound a port is not
   a service that can work — the pool can be exhausted, the password can have rotated. The
   reason a probe failed is logged and deliberately **not** put in the response body: a
@@ -178,10 +221,16 @@ The rules are not advice here; several of them fail the build.
   a `# TYPE` header. The gRPC method names come off the bound service descriptor, so a
   method renamed in the contract cannot leave a counter behind under its old name.
 - **Every metric label is bounded by construction.** A route label is one of
-  `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. An id in
+  `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. Only
+  `HttpApi.Probes` are seeded at start; the device routes appear once a handset uses them. An id in
   a label is one time series per request, forever.
 - **Reflection is `ProtoReflectionServiceV1`, not `ProtoReflectionService`.** The latter is
   `@Deprecated` in grpc-java, and `-deprecation -Xfatal-warnings` refuses to compile it.
+- **The runtime stage upgrades its packages.** The JRE base is pinned by digest, so its packages age
+  while the pin does not, and `build-and-push.yml` fails on any CRITICAL that has a fix — search's
+  merge build went red that way on perl-base (2026-10-14). On 2026-10-15 the pinned base held 0
+  CRITICAL and 5 fixable HIGH (curl, openssl). `apt-get upgrade` keeps the pin and takes the fixes;
+  curl stays, because the compose healthcheck uses it.
 - **`logback.xml` exists so the root logger is not DEBUG.** Logback with no configuration
   defaults to DEBUG on root, which had Flyway printing every statement it parsed and would
   have had doobie printing every query in production.

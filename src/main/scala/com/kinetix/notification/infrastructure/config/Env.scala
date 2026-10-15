@@ -9,6 +9,17 @@ object Env:
       case None        =>
         IO.raiseError(new IllegalStateException(s"$name is required and has no default."))
 
+  def declared(name: String): IO[String] =
+    IO(sys.env.get(name).map(_.trim)).flatMap:
+      case Some(value) => IO.pure(value)
+      case None        =>
+        IO.raiseError(
+          new IllegalStateException(
+            s"$name must be set, even if empty: an empty value grants nobody, and an unset one " +
+              "is a deploy that forgot it."
+          )
+        )
+
   def int(name: String): IO[Int] =
     required(name).flatMap: raw =>
       raw.toIntOption match
