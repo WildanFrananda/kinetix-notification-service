@@ -68,6 +68,7 @@ test:
     - sbt -batch "show Test/definedTests" > tests.txt
     - for suite in NotifySuite PostgresStoreSuite GrpcCallerSuite; do grep -q "$suite" tests.txt || { echo "the suite discovered no $suite"; cat tests.txt; exit 1; }; done
     - sbt -batch assembly
+    - cd "$(mktemp -d)" && jar xf "$CI_PROJECT_DIR/target/scala-3.3.4/kinetix-notification-service.jar" META-INF/MANIFEST.MF && grep -q '^Main-Class: com.kinetix.notification.Main' META-INF/MANIFEST.MF || { echo "the jar names no Main-Class"; exit 1; }
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

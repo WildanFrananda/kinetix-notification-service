@@ -240,6 +240,12 @@ The rules are not advice here; several of them fail the build.
   does it. Migrating from inside `Main` would have every replica racing to change the
   same schema at start-up, and would make a failed migration look like a service that
   would not boot.
+- **`Main` is named in `build.sbt`, because there are two.** With `Main` and `Migrate` both `IOApp`s,
+  sbt finds two main classes and picks neither, and sbt-assembly then writes a manifest with no
+  `Main-Class`. The migrator never noticed — compose starts it with `-cp … Migrate` — but the image's
+  `java -jar` exited with `no main manifest attribute` on every start: v1.0.0's first production deploy
+  failed that way on 2026-10-15. `Compile / mainClass` and `assembly / mainClass` pin it, and the
+  Dockerfile and both CIs fail when the jar's manifest does not name `com.kinetix.notification.Main`.
 - **The migrator reads `DatabaseSettings`, not `Settings`.** Creating a table does not
   need a push provider key, and a container that holds one it never uses is a credential
   in an extra place for no reason. It also means the schema stays fixable on a day the
