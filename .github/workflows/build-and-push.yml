@@ -55,9 +55,22 @@ jobs:
           load: true
           push: false
           tags: ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: |
+            SERVICE_VERSION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      # kinetix_build_info reports this, and bin/prod-deploy's metrics_conformance refuses
+      # version="unknown": v1.0.1 started healthy and was rolled back for exactly that, because this
+      # workflow never passed the build argument the Dockerfile reads.
+      - name: The image must know which build it is
+        run: |
+          baked="$(docker run --rm --entrypoint printenv "$IMAGE:${{ github.sha }}" KINETIX_SERVICE_VERSION)"
+          [ "$baked" = "${{ github.sha }}" ] || {
+            echo "KINETIX_SERVICE_VERSION is '$baked', not ${{ github.sha }}"
+            exit 1
+          }
 
       # CRITICAL only, and only where a fix exists. A finding nobody can act on today would block
       # every deploy without making anything safer; it belongs in the dependency audit instead.
