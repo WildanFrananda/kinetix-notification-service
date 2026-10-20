@@ -24,12 +24,13 @@ private[grpc] object Writes:
     )
 
   private def template(source: model.Template): wire.Template = source match
-    case model.Template.OrderPaid       => wire.Template.TEMPLATE_ORDER_PAID
-    case model.Template.OrderPacked     => wire.Template.TEMPLATE_ORDER_PACKED
-    case model.Template.CourierAssigned => wire.Template.TEMPLATE_COURIER_ASSIGNED
-    case model.Template.OrderDelivered  => wire.Template.TEMPLATE_ORDER_DELIVERED
-    case model.Template.CourierOffer    => wire.Template.TEMPLATE_COURIER_OFFER
-    case model.Template.ReturnOpened    => wire.Template.TEMPLATE_RETURN_OPENED
+    case model.Template.OrderPaid          => wire.Template.TEMPLATE_ORDER_PAID
+    case model.Template.OrderPacked        => wire.Template.TEMPLATE_ORDER_PACKED
+    case model.Template.CourierAssigned    => wire.Template.TEMPLATE_COURIER_ASSIGNED
+    case model.Template.OrderDelivered     => wire.Template.TEMPLATE_ORDER_DELIVERED
+    case model.Template.CourierOffer       => wire.Template.TEMPLATE_COURIER_OFFER
+    case model.Template.ReturnOpened       => wire.Template.TEMPLATE_RETURN_OPENED
+    case model.Template.LiabilityStatement => wire.Template.TEMPLATE_LIABILITY_STATEMENT
 
   private def channel(source: model.Channel): wire.Channel = source match
     case model.Channel.Push  => wire.Channel.CHANNEL_PUSH

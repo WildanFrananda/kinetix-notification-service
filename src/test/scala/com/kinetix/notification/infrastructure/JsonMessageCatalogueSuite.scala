@@ -9,7 +9,9 @@ class JsonMessageCatalogueSuite extends CatsEffectSuite:
     "order_number" -> "ORD-20260921-ABCD1234",
     "awb_number" -> "KNX-20260921-ABCDEFGH",
     "shipping_fee" -> "Rp15.000",
-    "return_number" -> "RMA-20260921-ABCD1234"
+    "return_number" -> "RMA-20260921-ABCD1234",
+    "epoch" -> "184",
+    "verify_url" -> "https://docs.example.test/id/verify/proof-of-liabilities/"
   )
 
   test("the shipped catalogue has copy for every template") {
