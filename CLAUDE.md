@@ -220,6 +220,15 @@ The rules are not advice here; several of them fail the build.
   failures" the same observation, and the estate's deploy gate greps for a sample line, not
   a `# TYPE` header. The gRPC method names come off the bound service descriptor, so a
   method renamed in the contract cannot leave a counter behind under its old name.
+- **The metrics interceptors forward to the call they wrap, never to `super`.** Scala 3.3 compiles
+  `super.close` in a `SimpleForwardingServerCall` (and `super.onClose` in a
+  `SimpleForwardingClientCallListener`) to an `invokespecial` on the class that declares it,
+  `io.grpc.PartialForwardingServerCall`, which is package-private. The JVM refuses it with
+  `IllegalAccessError` when the first call closes, Cats Effect treats that as fatal, and the
+  process dies. It shipped in v1.0.0 and stayed hidden until 2026-10-20, because nothing called
+  notification over gRPC before notary's first statement: that call killed it twice and failed
+  notary v1.7.0's deploy at the metrics gate. `MetricsInterceptorSuite` sends a real call through
+  both interceptors; `javap -c -p` on their classes must show no `Partial` reference.
 - **The image carries its commit as its version.** `kinetix_build_info` reads `KINETIX_SERVICE_VERSION`,
   baked from the Dockerfile's `SERVICE_VERSION` argument, and `build-and-push.yml` passes the commit sha,
   as the notary does. It did not at first — the workflow was copied from search, which serves no

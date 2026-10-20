@@ -24,7 +24,7 @@ final class ServerMetricsInterceptor(metrics: Metrics, dispatcher: Dispatcher[IO
     val counted = new ForwardingServerCall.SimpleForwardingServerCall[Q, P](call) {
       override def close(status: Status, trailers: Metadata): Unit = {
         dispatcher.unsafeRunAndForget(metrics.grpcServerCall(method, status.getCode.name))
-        super.close(status, trailers)
+        call.close(status, trailers)
       }
     }
     next.startCall(counted, headers)
