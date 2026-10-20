@@ -31,13 +31,14 @@ private[grpc] object Reads:
     )
 
   def template(raw: wire.Template): Option[model.Template] = raw match
-    case wire.Template.TEMPLATE_ORDER_PAID       => Some(model.Template.OrderPaid)
-    case wire.Template.TEMPLATE_ORDER_PACKED     => Some(model.Template.OrderPacked)
-    case wire.Template.TEMPLATE_COURIER_ASSIGNED => Some(model.Template.CourierAssigned)
-    case wire.Template.TEMPLATE_ORDER_DELIVERED  => Some(model.Template.OrderDelivered)
-    case wire.Template.TEMPLATE_COURIER_OFFER    => Some(model.Template.CourierOffer)
-    case wire.Template.TEMPLATE_RETURN_OPENED    => Some(model.Template.ReturnOpened)
-    case _                                       => None
+    case wire.Template.TEMPLATE_ORDER_PAID          => Some(model.Template.OrderPaid)
+    case wire.Template.TEMPLATE_ORDER_PACKED        => Some(model.Template.OrderPacked)
+    case wire.Template.TEMPLATE_COURIER_ASSIGNED    => Some(model.Template.CourierAssigned)
+    case wire.Template.TEMPLATE_ORDER_DELIVERED     => Some(model.Template.OrderDelivered)
+    case wire.Template.TEMPLATE_COURIER_OFFER       => Some(model.Template.CourierOffer)
+    case wire.Template.TEMPLATE_RETURN_OPENED       => Some(model.Template.ReturnOpened)
+    case wire.Template.TEMPLATE_LIABILITY_STATEMENT => Some(model.Template.LiabilityStatement)
+    case _                                          => None
 
   def channel(raw: wire.Channel): Option[model.Channel] = raw match
     case wire.Channel.CHANNEL_PUSH  => Some(model.Channel.Push)

@@ -53,6 +53,7 @@ lazy val root = (project in file("."))
       "io.grpc"         % "grpc-netty-shaded"    % grpcV,
       "io.grpc"         % "grpc-services"        % grpcV,
       "com.nimbusds"    % "nimbus-jose-jwt"      % nimbusV,
+      "com.thesamet.scalapb" %% "scalapb-runtime" % scalapb.compiler.Version.scalapbVersion % "protobuf",
 
       "org.typelevel"  %% "munit-cats-effect"    % munitCatsV % Test
     ),

@@ -22,5 +22,9 @@
   "ReturnOpened": {
     "title": "Pengembalian dibuka",
     "body": "Pengembalian {return_number} untuk pesanan {order_number} sudah dicatat."
+  },
+  "LiabilityStatement": {
+    "title": "Bukti saldo epoch {epoch} sudah ditandatangani",
+    "body": "Kinetix sudah menandatangani bukti saldo akunmu untuk epoch {epoch}. Unduh bukti itu dan periksa sendiri, tanpa perlu memercayai kami: {verify_url}"
   }
 }

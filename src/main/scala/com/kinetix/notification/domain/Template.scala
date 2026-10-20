@@ -7,3 +7,4 @@ enum Template:
   case OrderDelivered
   case CourierOffer
   case ReturnOpened
+  case LiabilityStatement

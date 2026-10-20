@@ -105,6 +105,20 @@ class PostgresStoreSuite extends CatsEffectSuite:
       assertEquals(unkeyed, List(Right(Insertion.Inserted), Right(Insertion.Inserted)))
   }
 
+  onPostgres("every template the service knows is one the table accepts and reads back") { xa =>
+    val store = PostgresNotificationRepository(xa, NoOpLogger[IO])
+
+    Template.values.toList.zipWithIndex
+      .traverse: (template, i) =>
+        val id = NotificationId.fromString(s"NTF-T$i").get
+        val notification = sent(s"NTF-T$i", withKey = None).copy(template = template)
+
+        store.save(notification) *> store.find(Fixtures.sender, id).map(found => (template, found))
+      .map: results =>
+        results.foreach: (template, found) =>
+          assertEquals(found.map(_.map(_.template)), Right(Some(template)), s"$template")
+  }
+
   onPostgres("two first saves of one key at once: exactly one wins, the other is told so") { xa =>
     val store = PostgresNotificationRepository(xa, NoOpLogger[IO])
 

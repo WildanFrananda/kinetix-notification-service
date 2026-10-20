@@ -12,7 +12,9 @@ class MessageSuite extends FunSuite:
       Template.OrderDelivered -> MessageCopy("Delivered", "Order {order_number} arrived."),
       Template.CourierOffer -> MessageCopy("Offer", "Carry {order_number} for {shipping_fee}."),
       Template.ReturnOpened ->
-        MessageCopy("Return", "Return {return_number} for order {order_number}.")
+        MessageCopy("Return", "Return {return_number} for order {order_number}."),
+      Template.LiabilityStatement ->
+        MessageCopy("Statement {epoch}", "Your statement for epoch {epoch} is signed: {verify_url}")
     )
   )
 
@@ -21,7 +23,9 @@ class MessageSuite extends FunSuite:
       "order_number" -> "ORD-20260921-ABCD1234",
       "awb_number" -> "KNX-20260921-ABCDEFGH",
       "shipping_fee" -> "Rp15.000",
-      "return_number" -> "RMA-20260921-ABCD1234"
+      "return_number" -> "RMA-20260921-ABCD1234",
+      "epoch" -> "184",
+      "verify_url" -> "https://docs.example.test/id/verify/proof-of-liabilities/"
     )
 
     Template.values.foreach: template =>

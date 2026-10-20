@@ -265,6 +265,15 @@ The rules are not advice here; several of them fail the build.
   What a template *requires* is read from its own copy — every `{name}` in the
   title or body must arrive in `params` — so a hand-kept list of required
   parameters can no longer disagree with the words beside it.
+- **The liability statement names no amount.** notary sends `TEMPLATE_LIABILITY_STATEMENT` with `epoch` and
+  `verify_url` only (notary PLAN.md step 6b). The user ruled on 2026-10-20 that a balance does not travel
+  through the email provider, so its copy must never ask for one; the holder fetches the proof with their own
+  token. `PostgresStoreSuite` saves every `Template` once, so a template the table's CHECK does not list fails
+  there rather than on the first real send.
+- **protoc finds the well-known types in scalapb-runtime.** identity.proto imports
+  `google/protobuf/timestamp.proto` since kinetix-contracts v1.1, and `.contracts/spoken` holds only three of
+  the contract's files. The first build past v1.0.16 stopped at `Import "google/protobuf/timestamp.proto" was
+  not found`. `build.sbt` puts `scalapb-runtime` in the `protobuf` scope, which is where sbt-protoc looks.
 - **An incomplete catalogue fails the start.** `MessageCatalogue.of` refuses a
   map that is missing any `Template`, and `Main` loads it before the server
   binds. A template with no copy would otherwise surface as a customer who was
