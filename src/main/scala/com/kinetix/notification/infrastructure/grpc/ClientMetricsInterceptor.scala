@@ -31,7 +31,7 @@ final class ClientMetricsInterceptor(metrics: Metrics, dispatcher: Dispatcher[IO
               dispatcher.unsafeRunAndForget(
                 metrics.grpcClientCall(peer, method.getFullMethodName, status.getCode.name)
               )
-              super.onClose(status, trailers)
+              listener.onClose(status, trailers)
             }
           }
         super.start(counted, headers)
