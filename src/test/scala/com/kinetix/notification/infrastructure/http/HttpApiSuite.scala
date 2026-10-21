@@ -1,15 +1,18 @@
 package com.kinetix.notification.infrastructure.http
 
 import cats.effect.IO
-import munit.CatsEffectSuite
-import org.http4s.{HttpRoutes, Method, Request, Status, Uri}
+import org.http4s.{HttpRoutes, Method, Request, Response, Status, Uri}
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.infrastructure.observability.Metrics
 
-class HttpApiSuite extends CatsEffectSuite:
+class HttpApiSuite extends BoundedSuite:
   private def get(path: String) = Request[IO](Method.GET, Uri.unsafeFromString(path))
 
   private def metrics = Metrics.create("kinetix-notification-service", "v0.1.0")
+
+  private def header(response: Response[IO], name: String): Option[String] =
+    response.headers.headers.find(_.name.toString == name).map(_.value)
 
   test("liveness answers while the database is gone") {
     for
@@ -58,6 +61,7 @@ class HttpApiSuite extends CatsEffectSuite:
     assertEquals(HttpApi.route(get("/orders/99999")), HttpApi.Unmatched)
     assertEquals(HttpApi.route(get("/health/ready")), HttpApi.Ready)
     assertEquals(HttpApi.route(get(DeviceApi.Path)), DeviceApi.Path)
+    assertEquals(HttpApi.route(get(DeviceApi.VerifyPath)), DeviceApi.VerifyPath)
   }
 
   test("a served request is counted under its own template") {
@@ -75,4 +79,32 @@ class HttpApiSuite extends CatsEffectSuite:
         body
       )
       assert(body.contains("""route="unmatched",status="404"} 1"""), body)
+  }
+
+  test("a path nobody serves is a JSON 404, like every other refusal this service gives") {
+    for
+      recorder <- metrics
+      app = HttpApi(recorder, IO.pure(true), HttpRoutes.empty[IO])
+      response <- app.run(get("/nothing/here"))
+      body <- response.as[String]
+    yield
+      assertEquals(response.status, Status.NotFound)
+      assertEquals(header(response, "Content-Type"), Some("application/json"))
+      assertEquals(body, """{"error":"NOT_FOUND"}""")
+  }
+
+  test("a served path asked with a method it does not take is a 405 naming the ones it does") {
+    for
+      recorder <- metrics
+      app = HttpApi(recorder, IO.pure(true), HttpRoutes.empty[IO])
+      devices <- app.run(Request[IO](Method.PUT, Uri.unsafeFromString(DeviceApi.Path)))
+      body <- devices.as[String]
+      probe <- app.run(Request[IO](Method.POST, Uri.unsafeFromString(HttpApi.Health)))
+    yield
+      assertEquals(devices.status, Status.MethodNotAllowed)
+      assertEquals(header(devices, "Allow"), Some("POST, DELETE"))
+      assertEquals(header(devices, "Content-Type"), Some("application/json"))
+      assertEquals(body, """{"error":"METHOD_NOT_ALLOWED"}""")
+      assertEquals(probe.status, Status.MethodNotAllowed)
+      assertEquals(header(probe, "Allow"), Some("GET"))
   }

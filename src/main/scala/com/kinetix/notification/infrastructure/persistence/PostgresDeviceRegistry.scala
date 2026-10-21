@@ -1,5 +1,7 @@
 package com.kinetix.notification.infrastructure.persistence
 
+import java.time.Instant
+
 import cats.effect.IO
 import cats.syntax.all.*
 import doobie.*
@@ -12,59 +14,125 @@ import com.kinetix.notification.domain.ports.DeviceRegistry
 final class PostgresDeviceRegistry(transactor: Transactor[IO], logger: Logger[IO])
   extends DeviceRegistry[IO]:
   def tokensFor(principal: PrincipalId): IO[Either[NotificationError, List[DeviceToken]]] =
-    val query =
-      sql"""
-        SELECT device_token
-          FROM notification_devices
-         WHERE principal_id = ${principal.value}
-         ORDER BY registered_at DESC
-      """.query[String].to[List]
+    run(DeviceQueries.tokensFor(principal).to[List].flatMap(_.traverse(readToken)))
 
-    run(query).map(_.map(_.flatMap(DeviceToken.fromString)))
+  def holderOf(token: DeviceToken): IO[Either[NotificationError, Option[PrincipalId]]] =
+    run(DeviceQueries.holderOf(token).option.flatMap(_.traverse(readPrincipal)))
 
   def register(
     principal: PrincipalId,
     token: DeviceToken,
-    platform: DevicePlatform
-  ): IO[Either[NotificationError, Boolean]] =
-    val query =
+    platform: DevicePlatform,
+    limit: DeviceLimit
+  ): IO[Either[NotificationError, DeviceClaim]] =
+    val claim =
       for
-        existing <-
-          sql"""
-            SELECT principal_id
-              FROM notification_devices
-             WHERE device_token = ${token.value}
-          """.query[String].option
-        _ <-
-          sql"""
-            INSERT INTO notification_devices (device_token, principal_id, platform, registered_at)
-            VALUES (
-              ${token.value},
-              ${principal.value},
-              ${Codecs.platformTo(platform)},
-              NOW()
-            )
-            ON CONFLICT (device_token) DO UPDATE
-               SET principal_id = EXCLUDED.principal_id,
-                   platform = EXCLUDED.platform,
-                   registered_at = EXCLUDED.registered_at
-          """.update.run
-      yield existing.contains(principal.value)
+        _ <- DeviceQueries.lockPrincipal(principal).unique
+        holder <- DeviceQueries.lockedHolderOf(token).option
+        claimed <- holder match
+          case None                                  => add(principal, token, platform, limit)
+          case Some(held) if held == principal.value =>
+            DeviceQueries.refresh(principal, token, platform).run.as(DeviceClaim.Refreshed)
+          case Some(_) => DeviceClaim.HeldByAnother.pure[ConnectionIO]
+      yield claimed
 
-    run(query)
+    run(claim)
+
+  def holdChallenge(
+    challenge: DeviceChallenge,
+    nonce: DeviceNonce
+  ): IO[Either[NotificationError, Unit]] =
+    val hold =
+      for
+        _ <- DeviceQueries.dropExpiredChallenges.run
+        _ <- DeviceQueries.holdChallenge(challenge, NonceDigest.of(nonce)).run
+      yield ()
+
+    run(hold)
+
+  def redeem(
+    claimant: PrincipalId,
+    token: DeviceToken,
+    nonce: DeviceNonce,
+    at: Instant,
+    limit: DeviceLimit
+  ): IO[Either[NotificationError, Redemption]] =
+    val redemption =
+      DeviceQueries
+        .lockedChallenge(claimant, token)
+        .option
+        .flatMap:
+          case None      => Redemption.NotPending.pure[ConnectionIO]
+          case Some(row) =>
+            row
+              .toChallenge(token, claimant)
+              .leftMap(IllegalStateException(_))
+              .liftTo[ConnectionIO]
+              .flatMap(challenge =>
+                settle(challenge, NonceDigest.matches(row.nonceDigest, nonce), at, limit)
+              )
+
+    run(redemption)
 
   def forget(token: DeviceToken): IO[Either[NotificationError, Unit]] =
-    run(sql"DELETE FROM notification_devices WHERE device_token = ${token.value}".update.run.void)
+    run(DeviceQueries.forget(token).run.void)
 
   def forgetOwned(principal: PrincipalId, token: DeviceToken): IO[Either[NotificationError, Unit]] =
-    val query =
-      sql"""
-        DELETE FROM notification_devices
-         WHERE device_token = ${token.value}
-           AND principal_id = ${principal.value}
-      """.update.run.void
+    run(DeviceQueries.forgetOwned(principal, token).run.void)
 
-    run(query)
+  private def add(
+    principal: PrincipalId,
+    token: DeviceToken,
+    platform: DevicePlatform,
+    limit: DeviceLimit
+  ): ConnectionIO[DeviceClaim] =
+    DeviceQueries
+      .insert(principal, token, platform)
+      .run
+      .flatMap:
+        case 1 => DeviceQueries.evictBeyond(principal, limit).run.as(DeviceClaim.Added)
+        case _ => DeviceClaim.HeldByAnother.pure[ConnectionIO]
+
+  private def settle(
+    challenge: DeviceChallenge,
+    nonceMatches: Boolean,
+    at: Instant,
+    limit: DeviceLimit
+  ): ConnectionIO[Redemption] =
+    val claimant = challenge.claimant
+    val token = challenge.token
+
+    challenge.judge(nonceMatches, at) match
+      case ChallengeVerdict.Matched =>
+        for
+          _ <- DeviceQueries.dropChallenge(claimant, token).run
+          _ <- DeviceQueries.lockPrincipal(claimant).unique
+          _ <- DeviceQueries.move(claimant, token, challenge.platform).run
+          _ <- DeviceQueries.evictBeyond(claimant, limit).run
+        yield Redemption.Verified
+
+      case ChallengeVerdict.Mismatched =>
+        val left = challenge.attemptsLeftAfterAMiss
+        val counted =
+          if left == 0 then DeviceQueries.dropChallenge(claimant, token)
+          else DeviceQueries.countMiss(claimant, token)
+
+        counted.run.as(Redemption.Refused(left))
+
+      case ChallengeVerdict.Expired | ChallengeVerdict.Exhausted =>
+        DeviceQueries.dropChallenge(claimant, token).run.as(Redemption.NotPending)
+
+  private def readToken(raw: String): ConnectionIO[DeviceToken] =
+    DeviceToken
+      .fromString(raw)
+      .toRight(IllegalStateException("a stored device token is empty or too long"))
+      .liftTo[ConnectionIO]
+
+  private def readPrincipal(raw: String): ConnectionIO[PrincipalId] =
+    PrincipalId
+      .fromString(raw)
+      .toRight(IllegalStateException("a stored device holder is empty or too long"))
+      .liftTo[ConnectionIO]
 
   private def run[A](query: ConnectionIO[A]): IO[Either[NotificationError, A]] =
     query

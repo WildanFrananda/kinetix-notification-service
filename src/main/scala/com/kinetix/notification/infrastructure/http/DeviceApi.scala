@@ -6,21 +6,33 @@ import cats.effect.IO
 import io.circe.{Decoder, Json, parser}
 import org.http4s.dsl.io.*
 import org.http4s.headers.Authorization
-import org.http4s.{AuthScheme, Credentials, Header, HttpRoutes, Request, Response, Status}
+import org.http4s.{AuthScheme, Credentials, Header, HttpRoutes, Method, Request, Response, Status}
 import org.typelevel.ci.CIString
 import org.typelevel.log4cats.Logger
 
-import com.kinetix.notification.application.{ForgetOwnDevice, RegisterDevice}
-import com.kinetix.notification.domain.{DevicePlatform, DeviceToken, NotificationError, PrincipalId}
+import com.kinetix.notification.application.{
+  ForgetOwnDevice,
+  RegisterDevice,
+  Registration,
+  VerifyDevice
+}
+import com.kinetix.notification.domain.*
 import com.kinetix.notification.infrastructure.grpc.Codes
 
 object DeviceApi:
   val Path: String = "/api/v1/notifications/devices"
+  val VerifyPath: String = "/api/v1/notifications/devices/verify"
   val MaxBodyBytes: Int = 4096
+
+  val Allowed: List[(String, List[Method])] = List(
+    Path -> List(Method.POST, Method.DELETE),
+    VerifyPath -> List(Method.POST)
+  )
 
   def apply(
     tokens: AccessTokenVerifier,
     register: RegisterDevice[IO],
+    verify: VerifyDevice[IO],
     forget: ForgetOwnDevice[IO],
     logger: Logger[IO]
   ): HttpRoutes[IO] =
@@ -32,16 +44,31 @@ object DeviceApi:
               case (None, _) => refuse(Status.BadRequest, NotificationError.InvalidDeviceToken)
               case (_, None) => refuse(Status.BadRequest, NotificationError.InvalidPlatform)
               case (Some(token), Some(kind)) =>
-                register(principal, token, kind).flatMap:
-                  case Left(error)         => failed(logger, error)
-                  case Right(alreadyKnown) =>
-                    json(
-                      Status.Ok,
-                      Json.obj(
-                        "registered" -> Json.True,
-                        "already_registered" -> Json.fromBoolean(alreadyKnown)
+                register
+                  .signedIn(principal, token, kind)
+                  .flatMap:
+                    case Left(error)                                    => failed(logger, error)
+                    case Right(Registration.Registered(alreadyKnown))   => registered(alreadyKnown)
+                    case Right(Registration.VerificationPending(until)) =>
+                      json(
+                        Status.Accepted,
+                        Json.obj(
+                          "registered" -> Json.False,
+                          "state" -> Json.fromString(Codes.VerificationPending),
+                          "expires_at" -> Json.fromString(until.toString)
+                        )
                       )
-                    )
+
+      case request @ POST -> Root / "api" / "v1" / "notifications" / "devices" / "verify" =>
+        authenticated(tokens, logger, request): principal =>
+          body[VerifyBody](request): sent =>
+            (DeviceToken.fromString(sent.deviceToken), DeviceNonce.fromString(sent.nonce)) match
+              case (None, _) => refuse(Status.BadRequest, NotificationError.InvalidDeviceToken)
+              case (_, None) => refuse(Status.BadRequest, NotificationError.InvalidNonce)
+              case (Some(token), Some(nonce)) =>
+                verify(principal, token, nonce).flatMap:
+                  case Left(error) => failed(logger, error)
+                  case Right(())   => registered(alreadyKnown = false)
 
       case request @ DELETE -> Root / "api" / "v1" / "notifications" / "devices" =>
         authenticated(tokens, logger, request): principal =>
@@ -87,11 +114,29 @@ object DeviceApi:
     case "IOS"     => Some(DevicePlatform.Ios)
     case _         => None
 
+  private def registered(alreadyKnown: Boolean): IO[Response[IO]] =
+    json(
+      Status.Ok,
+      Json.obj(
+        "registered" -> Json.True,
+        "already_registered" -> Json.fromBoolean(alreadyKnown)
+      )
+    )
+
   private def failed(logger: Logger[IO], error: NotificationError): IO[Response[IO]] =
     error match
       case NotificationError.StoreUnavailable(cause) =>
         logger.error(s"the device registry could not be reached: $cause") *>
           refuse(Status.ServiceUnavailable, error)
+      case NotificationError.SenderUnavailable(_, cause) =>
+        logger.warn(s"the push provider did not answer a proof of possession: $cause") *>
+          refuse(Status.ServiceUnavailable, error)
+      case NotificationError.SenderRejected(_, cause) =>
+        logger.error(s"the push provider refused a proof of possession: $cause") *>
+          refuse(Status.BadGateway, error)
+      case NotificationError.AddressGone(_, _) | NotificationError.VerificationNotPending |
+        NotificationError.VerificationFailed(_) =>
+        refuse(Status.UnprocessableEntity, error)
       case _ => refuse(Status.BadRequest, error)
 
   private def refuse(status: Status, error: NotificationError): IO[Response[IO]] =

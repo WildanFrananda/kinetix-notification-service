@@ -1,18 +1,29 @@
 package com.kinetix.notification.infrastructure.persistence
 
-import cats.effect.{IO, Resource}
+import java.time.Duration
+
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import doobie.Transactor
 import doobie.hikari.HikariTransactor
 import doobie.implicits.*
-import munit.{CatsEffectSuite, TestOptions}
+import io.circe.parser
+import munit.TestOptions
+import org.http4s.client.Client
+import org.http4s.dsl.io.*
+import org.http4s.headers.Authorization
+import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Status, Uri}
 import org.typelevel.log4cats.noop.NoOpLogger
 
+import com.kinetix.notification.BoundedSuite
+import com.kinetix.notification.application.{ForgetOwnDevice, RegisterDevice, VerifyDevice}
 import com.kinetix.notification.domain.*
-import com.kinetix.notification.fakes.Fixtures
+import com.kinetix.notification.fakes.{CountingRetry, FakeAccessTokens, Fixtures}
 import com.kinetix.notification.infrastructure.config.DatabaseSettings
+import com.kinetix.notification.infrastructure.http.{DeviceApi, HttpPushSender, TokenVerdict}
+import com.kinetix.notification.infrastructure.{SecureRandomNonceSource, SystemTimeSource}
 
-class PostgresStoreSuite extends CatsEffectSuite:
+class PostgresStoreSuite extends BoundedSuite:
   private val settings: Option[DatabaseSettings] =
     (
       sys.env.get("NOTIFICATION_TEST_DATABASE_URL"),
@@ -63,7 +74,12 @@ class PostgresStoreSuite extends CatsEffectSuite:
             )
           )
       .flatTap: xa =>
-        sql"TRUNCATE notification_attempts, notifications, notification_devices".update.run
+        sql"""
+          TRUNCATE notification_attempts,
+                   notifications,
+                   notification_devices,
+                   notification_device_challenges
+        """.update.run
           .transact(xa)
           .void
 
@@ -72,6 +88,21 @@ class PostgresStoreSuite extends CatsEffectSuite:
     case _                                           => false
 
   private val key: IdempotencyKey = IdempotencyKey.fromString("ORDER-42-PACKED").get
+
+  private val limit: DeviceLimit = DeviceLimit.fromInt(10).get
+  private val claimant: PrincipalId =
+    PrincipalId.fromString("99999999-8888-7777-6666-555555555555").get
+  private val handset: DeviceToken = DeviceToken.fromString("handset-token-1").get
+  private val nonce: DeviceNonce = DeviceNonce.fromString("q8PZ1-nonce-sent-to-the-handset").get
+
+  private def claimed(registry: PostgresDeviceRegistry): IO[Unit] =
+    for
+      _ <- registry.register(Fixtures.recipient, handset, DevicePlatform.Android, limit)
+      _ <- registry.holdChallenge(
+        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
+        nonce
+      )
+    yield ()
 
   private def sent(
     id: String,
@@ -190,7 +221,7 @@ class PostgresStoreSuite extends CatsEffectSuite:
     val token = DeviceToken.fromString("handset-token-1").get
 
     for
-      _ <- registry.register(owner, token, DevicePlatform.Android)
+      _ <- registry.register(owner, token, DevicePlatform.Android, limit)
       _ <- registry.forgetOwned(stranger, token)
       afterStranger <- registry.tokensFor(owner)
       _ <- registry.forgetOwned(owner, token)
@@ -200,19 +231,291 @@ class PostgresStoreSuite extends CatsEffectSuite:
       assertEquals(afterOwner, Right(Nil))
   }
 
-  onPostgres("a token another principal held moves to the one who registers it now") { xa =>
+  onPostgres("a token another principal holds stays with them when someone else registers it") {
+    xa =>
+      val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+
+      for
+        first <- registry.register(Fixtures.recipient, handset, DevicePlatform.Android, limit)
+        again <- registry.register(Fixtures.recipient, handset, DevicePlatform.Ios, limit)
+        taken <- registry.register(claimant, handset, DevicePlatform.Ios, limit)
+        kept <- registry.tokensFor(Fixtures.recipient)
+        arrived <- registry.tokensFor(claimant)
+        holder <- registry.holderOf(handset)
+      yield
+        assertEquals(first, Right(DeviceClaim.Added))
+        assertEquals(again, Right(DeviceClaim.Refreshed))
+        assertEquals(taken, Right(DeviceClaim.HeldByAnother))
+        assertEquals(kept, Right(List(handset)))
+        assertEquals(arrived, Right(Nil))
+        assertEquals(holder, Right(Some(Fixtures.recipient)))
+  }
+
+  onPostgres("a nonce is kept as its SHA-256 digest, never as itself") { xa =>
     val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
-    val before = Fixtures.recipient
-    val after = PrincipalId.fromString("99999999-8888-7777-6666-555555555555").get
-    val token = DeviceToken.fromString("handset-token-1").get
+    val expected = java.util.HexFormat
+      .of()
+      .formatHex(
+        java.security.MessageDigest
+          .getInstance("SHA-256")
+          .digest(nonce.value.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      )
 
     for
-      _ <- registry.register(before, token, DevicePlatform.Android)
-      moved <- registry.register(after, token, DevicePlatform.Ios)
-      left <- registry.tokensFor(before)
-      arrived <- registry.tokensFor(after)
+      _ <- claimed(registry)
+      rows <-
+        sql"SELECT nonce_digest, platform, failed_attempts FROM notification_device_challenges"
+          .query[(String, String, Int)]
+          .to[List]
+          .transact(xa)
+    yield assertEquals(rows, List((expected, "IOS", 0)))
+  }
+
+  onPostgres("only the claimant's own matching nonce moves the token, and only once") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val during = Fixtures.at.plusSeconds(60)
+    val wrong = DeviceNonce.fromString("guessed").get
+
+    for
+      _ <- claimed(registry)
+      byHolder <- registry.redeem(Fixtures.recipient, handset, nonce, during, limit)
+      missed <- registry.redeem(claimant, handset, wrong, during, limit)
+      verified <- registry.redeem(claimant, handset, nonce, during, limit)
+      again <- registry.redeem(claimant, handset, nonce, during, limit)
+      holder <- registry.holderOf(handset)
+      left <- sql"SELECT COUNT(*) FROM notification_device_challenges"
+        .query[Int]
+        .unique
+        .transact(xa)
     yield
-      assertEquals(moved, Right(false))
-      assertEquals(left, Right(Nil))
-      assertEquals(arrived, Right(List(token)))
+      assertEquals(byHolder, Right(Redemption.NotPending))
+      assertEquals(missed, Right(Redemption.Refused(DeviceChallenge.MaxFailedAttempts - 1)))
+      assertEquals(verified, Right(Redemption.Verified))
+      assertEquals(again, Right(Redemption.NotPending))
+      assertEquals(holder, Right(Some(claimant)))
+      assertEquals(left, 0)
+  }
+
+  onPostgres("a nonce presented at or after its expiry is spent and moves nothing") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val expiry = Fixtures.at.plus(DeviceChallenge.Lifetime)
+
+    for
+      _ <- claimed(registry)
+      late <- registry.redeem(claimant, handset, nonce, expiry, limit)
+      retried <- registry.redeem(claimant, handset, nonce, Fixtures.at, limit)
+      holder <- registry.holderOf(handset)
+    yield
+      assertEquals(late, Right(Redemption.NotPending))
+      assertEquals(retried, Right(Redemption.NotPending), "an expired proof must not survive")
+      assertEquals(holder, Right(Some(Fixtures.recipient)))
+  }
+
+  onPostgres("five wrong nonces spend the proof, and the right one afterwards moves nothing") {
+    xa =>
+      val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+      val wrong = DeviceNonce.fromString("guessed").get
+      val during = Fixtures.at.plusSeconds(60)
+
+      for
+        _ <- claimed(registry)
+        misses <- List
+          .fill(DeviceChallenge.MaxFailedAttempts)(wrong)
+          .traverse(registry.redeem(claimant, handset, _, during, limit))
+        late <- registry.redeem(claimant, handset, nonce, during, limit)
+        holder <- registry.holderOf(handset)
+      yield
+        assertEquals(
+          misses,
+          List(4, 3, 2, 1, 0).map(left => Right(Redemption.Refused(left)))
+        )
+        assertEquals(late, Right(Redemption.NotPending))
+        assertEquals(holder, Right(Some(Fixtures.recipient)))
+  }
+
+  onPostgres("a new proof for the same claim replaces the old nonce and its count") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val wrong = DeviceNonce.fromString("guessed").get
+    val fresh = DeviceNonce.fromString("a-second-nonce").get
+    val during = Fixtures.at.plusSeconds(60)
+
+    for
+      _ <- claimed(registry)
+      _ <- registry.redeem(claimant, handset, wrong, during, limit)
+      _ <- registry.holdChallenge(
+        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
+        fresh
+      )
+      stale <- registry.redeem(claimant, handset, nonce, during, limit)
+      counted <- sql"SELECT failed_attempts FROM notification_device_challenges"
+        .query[Int]
+        .unique
+        .transact(xa)
+      verified <- registry.redeem(claimant, handset, fresh, during, limit)
+    yield
+      assertEquals(stale, Right(Redemption.Refused(DeviceChallenge.MaxFailedAttempts - 1)))
+      assertEquals(counted, 1)
+      assertEquals(verified, Right(Redemption.Verified))
+  }
+
+  onPostgres("expired proofs are cleared whenever a new one is held") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val longAgo = Fixtures.at.minus(Duration.ofDays(1))
+
+    for
+      _ <- registry.holdChallenge(
+        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, longAgo),
+        nonce
+      )
+      _ <- registry.holdChallenge(
+        DeviceChallenge.issued(
+          DeviceToken.fromString("handset-token-2").get,
+          claimant,
+          DevicePlatform.Ios,
+          java.time.Instant.now()
+        ),
+        nonce
+      )
+      tokens <- sql"SELECT device_token FROM notification_device_challenges"
+        .query[String]
+        .to[List]
+        .transact(xa)
+    yield assertEquals(tokens, List("handset-token-2"))
+  }
+
+  onPostgres("a principal keeps the newest handsets up to the limit, however they arrive") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val two = DeviceLimit.fromInt(2).get
+    val tokens = List("first", "second", "third").map(DeviceToken.fromString(_).get)
+
+    for
+      claims <- tokens.traverse(registry.register(claimant, _, DevicePlatform.Android, two))
+      kept <- registry.tokensFor(claimant)
+      _ <- registry.register(Fixtures.recipient, handset, DevicePlatform.Android, two)
+      _ <- registry.holdChallenge(
+        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
+        nonce
+      )
+      verified <- registry.redeem(claimant, handset, nonce, Fixtures.at.plusSeconds(1), two)
+      afterProof <- registry.tokensFor(claimant)
+    yield
+      assertEquals(claims, List.fill(3)(Right(DeviceClaim.Added)))
+      assertEquals(kept, Right(tokens.drop(1).reverse))
+      assertEquals(verified, Right(Redemption.Verified))
+      assertEquals(afterProof, Right(List(handset, tokens(2))))
+  }
+
+  onPostgres("the same nonce echoed twice at once moves the token exactly once") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val during = Fixtures.at.plusSeconds(60)
+
+    for
+      _ <- claimed(registry)
+      both <- (
+        registry.redeem(claimant, handset, nonce, during, limit),
+        registry.redeem(claimant, handset, nonce, during, limit)
+      ).parTupled
+    yield assertEquals(
+      Set(both._1, both._2),
+      Set(Right(Redemption.Verified), Right(Redemption.NotPending))
+    )
+  }
+
+  onPostgres("handsets registered at once by one principal still respect the limit") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val one = DeviceLimit.fromInt(1).get
+    val tokens = (1 to 8).toList.map(n => DeviceToken.fromString(s"handset-$n").get)
+
+    for
+      _ <- tokens.parTraverse(registry.register(claimant, _, DevicePlatform.Android, one))
+      kept <- registry.tokensFor(claimant)
+    yield assertEquals(kept.map(_.length), Right(1))
+  }
+
+  onPostgres(
+    "over HTTP, the claimant takes the token with the nonce FCM was handed, and no other"
+  ) { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val tokens = FakeAccessTokens(
+      Map(
+        "holder" -> TokenVerdict.Valid(Fixtures.recipient),
+        "claimant" -> TokenVerdict.Valid(claimant)
+      )
+    )
+    val time = SystemTimeSource()
+
+    def asking(bearer: String, path: String, body: String): Request[IO] =
+      Request[IO](Method.POST, Uri.unsafeFromString(path))
+        .withEntity(body)
+        .putHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, bearer)))
+
+    val registering = """{"device_token":"handset-token-1","platform":"ANDROID"}"""
+
+    for
+      pushed <- Ref.of[IO, List[String]](Nil)
+      fcm = Client.fromHttpApp(
+        HttpApp[IO](request =>
+          request.bodyText.compile.string.flatMap(body => pushed.update(_ :+ body)) *> Ok("{}")
+        )
+      )
+      push = HttpPushSender(
+        fcm,
+        Uri.unsafeFromString("https://fcm.googleapis.com/v1/projects/kinetix-test/messages:send"),
+        IO.pure("access-token"),
+        time
+      )
+      nonces <- SecureRandomNonceSource.create
+      retry <- CountingRetry.upTo(1)
+      api = DeviceApi(
+        tokens,
+        RegisterDevice[IO](registry, push, nonces, retry, time, limit),
+        VerifyDevice[IO](registry, time, limit),
+        ForgetOwnDevice[IO](registry),
+        NoOpLogger[IO]
+      ).orNotFound
+      held <- api.run(asking("holder", DeviceApi.Path, registering))
+      claim <- api.run(asking("claimant", DeviceApi.Path, registering))
+      sent <- pushed.get
+      nonce = parser
+        .parse(sent.head)
+        .flatMap(_.hcursor.downField("message").downField("data").get[String]("nonce"))
+        .getOrElse(fail(s"no nonce in ${sent.head}"))
+      stolen <- api.run(
+        asking(
+          "holder",
+          DeviceApi.VerifyPath,
+          s"""{"device_token":"handset-token-1","nonce":"$nonce"}"""
+        )
+      )
+      guessed <- api.run(
+        asking(
+          "claimant",
+          DeviceApi.VerifyPath,
+          """{"device_token":"handset-token-1","nonce":"x"}"""
+        )
+      )
+      before <- registry.holderOf(handset)
+      verified <- api.run(
+        asking(
+          "claimant",
+          DeviceApi.VerifyPath,
+          s"""{"device_token":"handset-token-1","nonce":"$nonce"}"""
+        )
+      )
+      after <- registry.holderOf(handset)
+      stored <- sql"SELECT nonce_digest FROM notification_device_challenges"
+        .query[String]
+        .to[List]
+        .transact(xa)
+    yield
+      assertEquals(held.status, Status.Ok)
+      assertEquals(claim.status, Status.Accepted)
+      assertEquals(sent.length, 1)
+      assertEquals(nonce.length, 43, "32 random bytes, base64url without padding")
+      assertEquals(stolen.status, Status.UnprocessableEntity)
+      assertEquals(guessed.status, Status.UnprocessableEntity)
+      assertEquals(before, Right(Some(Fixtures.recipient)))
+      assertEquals(verified.status, Status.Ok)
+      assertEquals(after, Right(Some(claimant)))
+      assertEquals(stored, Nil)
   }

@@ -53,3 +53,37 @@ class ValueSuite extends FunSuite:
     assertEquals(recipient.addressOn(Channel.Push), None)
     assert(recipient.isReachable)
   }
+
+  test("a nonce is not blank and not longer than the limit") {
+    assertEquals(DeviceNonce.fromString(" "), None)
+    assertEquals(DeviceNonce.fromString("x" * (DeviceNonce.MaxLength + 1)), None)
+    assertEquals(DeviceNonce.fromString(" n-1 ").map(_.value), Some("n-1"))
+  }
+
+  test("a device limit holds at least one handset") {
+    assertEquals(DeviceLimit.fromInt(0), None)
+    assertEquals(DeviceLimit.fromInt(-3), None)
+    assertEquals(DeviceLimit.fromInt(10).map(_.value), Some(10))
+  }
+
+  test("a proof is judged by its expiry first, then its spent attempts, then the nonce") {
+    val at = java.time.Instant.parse("2026-10-21T10:00:00Z")
+    val issued = DeviceChallenge.issued(
+      DeviceToken.fromString("handset-1").get,
+      PrincipalId.fromString("p-1").get,
+      DevicePlatform.Android,
+      at
+    )
+    val spent = issued.copy(failedAttempts = DeviceChallenge.MaxFailedAttempts)
+
+    assertEquals(issued.judge(nonceMatches = true, at), ChallengeVerdict.Matched)
+    assertEquals(issued.judge(nonceMatches = false, at), ChallengeVerdict.Mismatched)
+    assertEquals(issued.judge(nonceMatches = true, issued.expiresAt), ChallengeVerdict.Expired)
+    assertEquals(spent.judge(nonceMatches = true, at), ChallengeVerdict.Exhausted)
+    assertEquals(issued.expiresAt, at.plus(DeviceChallenge.Lifetime))
+    assertEquals(issued.attemptsLeftAfterAMiss, DeviceChallenge.MaxFailedAttempts - 1)
+  }
+
+  test("a dead address is not worth repeating") {
+    assert(!NotificationError.AddressGone(Channel.Push, "404: UNREGISTERED").isTransient)
+  }

@@ -4,13 +4,13 @@ import cats.effect.{IO, Resource}
 import fs2.grpc.syntax.all.*
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.{Metadata, Status, StatusRuntimeException}
-import munit.CatsEffectSuite
 import notification.v1.notification as wire
 
-import com.kinetix.notification.domain.Caller
+import com.kinetix.notification.BoundedSuite
+import com.kinetix.notification.domain.{Caller, DeviceLimit, DevicePlatform, DeviceToken}
 import com.kinetix.notification.fakes.Fixtures
 
-class GrpcCallerSuite extends CatsEffectSuite:
+class GrpcCallerSuite extends BoundedSuite:
   private val order: Caller = Caller.fromString("order").get
 
   private val notifyOnly: String = "order@notification.v1.NotificationService/Notify"
@@ -92,4 +92,47 @@ class GrpcCallerSuite extends CatsEffectSuite:
       yield
         assertEquals(code, Some(Status.Code.PERMISSION_DENIED))
         assertEquals(devices, Map.empty)
+  }
+
+  test("a peer granted RegisterDevice still cannot bind a handset its principal has not proved") {
+    val register = wire.RegisterDeviceRequest(
+      principalId = Fixtures.recipient.value,
+      deviceToken = "attacker-handset",
+      platform = wire.DevicePlatform.DEVICE_PLATFORM_ANDROID
+    )
+    val granted = "order@notification.v1.NotificationService/RegisterDevice"
+
+    connected(granted, Some(order)).use: (served, client) =>
+      for
+        response <- client.registerDevice(register, Metadata())
+        devices <- served.devices.contents
+        sent <- served.challenges.sent.get
+      yield
+        assertEquals(response.registered, false)
+        assertEquals(response.error.map(_.errorCode), Some("DEVICE_VERIFICATION_PENDING"))
+        assertEquals(devices, Map.empty)
+        assertEquals(sent.map(_._1.value), List("attacker-handset"))
+  }
+
+  test("ForgetDevice over gRPC forgets nothing, because a token alone names no holder") {
+    val granted = "order@notification.v1.NotificationService/ForgetDevice"
+    val token = DeviceToken.fromString("victim-handset").get
+
+    connected(granted, Some(order)).use: (served, client) =>
+      for
+        _ <- served.devices.register(
+          Fixtures.recipient,
+          token,
+          DevicePlatform.Android,
+          DeviceLimit.fromInt(10).get
+        )
+        response <- client.forgetDevice(
+          wire.ForgetDeviceRequest(deviceToken = "victim-handset"),
+          Metadata()
+        )
+        devices <- served.devices.contents
+      yield
+        assertEquals(response.forgotten, false)
+        assertEquals(response.error.map(_.errorCode), Some("PRINCIPAL_REQUIRED"))
+        assertEquals(devices.keySet, Set("victim-handset"))
   }

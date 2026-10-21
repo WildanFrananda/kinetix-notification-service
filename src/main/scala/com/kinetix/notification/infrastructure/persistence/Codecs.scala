@@ -50,6 +50,11 @@ private[persistence] object Codecs:
     case DevicePlatform.Android => "ANDROID"
     case DevicePlatform.Ios     => "IOS"
 
+  def platformFrom(raw: String): Option[DevicePlatform] = raw match
+    case "ANDROID" => Some(DevicePlatform.Android)
+    case "IOS"     => Some(DevicePlatform.Ios)
+    case _         => None
+
   def paramsTo(params: Map[String, String]): String =
     Encoder[Map[String, String]].apply(params).noSpaces
 

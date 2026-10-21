@@ -15,6 +15,13 @@ private[infrastructure] object Codes:
     case NotificationError.NoChannelAvailable(_)      => "NO_CHANNEL_AVAILABLE"
     case NotificationError.SenderRejected(_, _)       => "SENDER_REJECTED"
     case NotificationError.SenderUnavailable(_, _)    => "SENDER_UNAVAILABLE"
+    case NotificationError.AddressGone(_, _)          => "ADDRESS_GONE"
     case NotificationError.StoreUnavailable(_)        => "STORE_UNAVAILABLE"
     case NotificationError.InvalidDeviceToken         => "INVALID_DEVICE_TOKEN"
     case NotificationError.InvalidPlatform            => "INVALID_PLATFORM"
+    case NotificationError.InvalidNonce               => "INVALID_NONCE"
+    case NotificationError.VerificationNotPending     => "VERIFICATION_NOT_PENDING"
+    case NotificationError.VerificationFailed(_)      => "VERIFICATION_FAILED"
+
+  val VerificationPending: String = "DEVICE_VERIFICATION_PENDING"
+  val PrincipalRequired: String = "PRINCIPAL_REQUIRED"

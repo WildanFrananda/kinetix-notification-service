@@ -1,25 +1,27 @@
 package com.kinetix.notification.application
 
 import cats.effect.IO
-import munit.CatsEffectSuite
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.domain.*
 import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.fakes.*
 
-class NotifySuite extends CatsEffectSuite:
+class NotifySuite extends BoundedSuite:
   private def notify(
     directory: RecipientDirectory[IO],
     senders: List[NotificationSender[IO]],
     repository: NotificationRepository[IO],
     retry: RetryPolicy[IO],
     grants: TemplateGrants = Fixtures.everything,
-    ids: NotificationIdSource[IO] = FixedIds(Fixtures.notificationId)
+    ids: NotificationIdSource[IO] = FixedIds(Fixtures.notificationId),
+    devices: DeviceRegistry[IO] = FakeDeviceRegistry.fresh()
   ): Notify[IO] =
     Notify[IO](
       Fixtures.catalogue,
       grants,
       directory,
+      devices,
       senders,
       repository,
       retry,
@@ -357,4 +359,100 @@ class NotifySuite extends CatsEffectSuite:
     yield
       assertEquals(result, Left(NotificationError.IdempotencyKeyReused(key)))
       assertEquals(sent, Nil)
+  }
+
+  test("a recipient who prefers push hears it on every handset, not only the newest") {
+    val older = Address.Push(DeviceToken.fromString("handset-token-2").get)
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.email, Fixtures.push, older)
+      email <- FakeSender.working(Channel.Email)
+      push <- FakeSender.working(Channel.Push)
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(email, push), repository, retry)(
+        Fixtures.packed(preferred = List(Channel.Push))
+      )
+      pushSent <- push.sent.get
+      emailSent <- email.sent.get
+    yield
+      assertEquals(pushSent.map(_._1), List(Fixtures.push, older))
+      assertEquals(emailSent, Nil)
+      assertEquals(
+        result.map(_.attempts.map(attempt => (attempt.channel, attempt.status, attempt.attempts))),
+        Right(List((Channel.Push, DeliveryStatus.Sent, 2)))
+      )
+  }
+
+  test("a dead handset is forgotten, and the live one still hears the message") {
+    val older = DeviceToken.fromString("handset-token-2").get
+    val gone = NotificationError.AddressGone(Channel.Push, "404: UNREGISTERED")
+    val limit = DeviceLimit.fromInt(10).get
+
+    for
+      devices <- FakeDeviceRegistry.empty
+      _ <- devices.register(Fixtures.recipient, older, DevicePlatform.Android, limit)
+      _ <- devices.register(
+        Fixtures.recipient,
+        DeviceToken.fromString("handset-token-1").get,
+        DevicePlatform.Ios,
+        limit
+      )
+      directory <- FakeDirectory.holding(Fixtures.push, Address.Push(older))
+      push <- FakeSender.answering(Channel.Push, List(Right(()), Left(gone)))
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(push), repository, retry, devices = devices)(
+        Fixtures.packed()
+      )
+      kept <- devices.contents
+      stored <- repository.contents
+    yield
+      assertEquals(kept.keySet, Set("handset-token-1"))
+      assertEquals(
+        result.map(_.attempts.map(attempt => (attempt.status, attempt.attempts))),
+        Right(List((DeliveryStatus.Sent, 2)))
+      )
+      assertEquals(stored.head.attempts.map(_.status), List(DeliveryStatus.Sent))
+  }
+
+  test("a refusal that does not say the token is dead keeps the handset") {
+    val refused = NotificationError.SenderRejected(Channel.Push, "403: SENDER_ID_MISMATCH")
+    val limit = DeviceLimit.fromInt(10).get
+    val token = DeviceToken.fromString("handset-token-1").get
+
+    for
+      devices <- FakeDeviceRegistry.empty
+      _ <- devices.register(Fixtures.recipient, token, DevicePlatform.Ios, limit)
+      directory <- FakeDirectory.holding(Fixtures.push)
+      push <- FakeSender.answering(Channel.Push, List(Left(refused)))
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(push), repository, retry, devices = devices)(
+        Fixtures.packed()
+      )
+      kept <- devices.contents
+    yield
+      assertEquals(kept.keySet, Set("handset-token-1"))
+      assertEquals(
+        result.map(_.attempts.map(attempt => (attempt.status, attempt.lastError))),
+        Right(List((DeliveryStatus.Failed, Some(refused.detail))))
+      )
+  }
+
+  test("when every handset fails, the push attempt is failed and says why for each") {
+    val gone = NotificationError.AddressGone(Channel.Push, "404: UNREGISTERED")
+    val refused = NotificationError.SenderRejected(Channel.Push, "401: THIRD_PARTY_AUTH_ERROR")
+    val older = Address.Push(DeviceToken.fromString("handset-token-2").get)
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.push, older)
+      push <- FakeSender.answering(Channel.Push, List(Left(gone), Left(refused)))
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(push), repository, retry)(Fixtures.packed())
+    yield assertEquals(
+      result.map(_.attempts.map(attempt => (attempt.status, attempt.attempts, attempt.lastError))),
+      Right(List((DeliveryStatus.Failed, 2, Some(s"${gone.detail}; ${refused.detail}"))))
+    )
   }

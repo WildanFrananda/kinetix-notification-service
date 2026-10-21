@@ -10,22 +10,27 @@ import com.nimbusds.jose.jwk.{JWKSet, RSAKey}
 import com.nimbusds.jose.proc.SecurityContext
 import com.nimbusds.jose.{JWSAlgorithm, JWSHeader, KeySourceException}
 import com.nimbusds.jwt.{JWTClaimsSet, PlainJWT, SignedJWT}
-import munit.CatsEffectSuite
+import cats.effect.IO
+import cats.syntax.all.*
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.domain.PrincipalId
+import com.kinetix.notification.fakes.JwksServer
 
-class NimbusAccessTokenVerifierSuite extends CatsEffectSuite:
+class NimbusAccessTokenVerifierSuite extends BoundedSuite:
   private val issuer = "https://identity.kinetix.test"
   private val audience = "kinetix"
   private val principal = "11111111-2222-3333-4444-555555555555"
 
   private val signing: RSAKey = RSAKeyGenerator(2048).keyID("identity-1").generate()
   private val stranger: RSAKey = RSAKeyGenerator(2048).keyID("identity-1").generate()
+  private val retired: RSAKey = RSAKeyGenerator(2048).keyID("identity-retired").generate()
 
   private val verifier = NimbusAccessTokenVerifier.over(
     ImmutableJWKSet[SecurityContext](JWKSet(signing.toPublicJWK)),
     issuer,
-    audience
+    audience,
+    IO.pure(true)
   )
 
   private def claims(
@@ -112,11 +117,41 @@ class NimbusAccessTokenVerifierSuite extends CatsEffectSuite:
         throw KeySourceException("connect timed out")
 
     NimbusAccessTokenVerifier
-      .over(unreachable, issuer, audience)
+      .over(unreachable, issuer, audience, IO.pure(false))
       .verify(signed(claims()))
       .map(verdict => assert(isUnverifiable(verdict), s"an outage was reported as $verdict"))
   }
 
   test("garbage is invalid") {
     verifier.verify("not.a.token").map(verdict => assert(isInvalid(verdict)))
+  }
+
+  test("a key identity does not publish is a bad token every time, not an outage from the second") {
+    JwksServer
+      .serving(JWKSet(signing.toPublicJWK).toString)
+      .use: identity =>
+        for
+          remote <- NimbusAccessTokenVerifier.remote(identity.url, issuer, audience)
+          verdicts <- List.fill(4)(signed(claims(), retired)).traverse(remote.verify)
+          valid <- remote.verify(signed(claims()))
+        yield
+          assert(
+            verdicts.forall(isInvalid),
+            s"identity answered all ${identity.fetches} reads, and the verdicts were $verdicts"
+          )
+          assertEquals(valid, TokenVerdict.Valid(PrincipalId.fromString(principal).get))
+  }
+
+  test("identity going quiet stays an outage, however often its key set was asked for") {
+    JwksServer
+      .serving(JWKSet(signing.toPublicJWK).toString)
+      .use: identity =>
+        for
+          remote <- NimbusAccessTokenVerifier.remote(identity.url, issuer, audience)
+          first <- remote.verify(signed(claims()))
+          _ <- identity.goQuiet
+          verdicts <- List.fill(4)(signed(claims(), retired)).traverse(remote.verify)
+        yield
+          assertEquals(first, TokenVerdict.Valid(PrincipalId.fromString(principal).get))
+          assert(verdicts.forall(isUnverifiable), s"an outage was reported as $verdicts")
   }

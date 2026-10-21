@@ -25,6 +25,7 @@ import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.infrastructure.{
   JsonMessageCatalogue,
   RandomNotificationIdSource,
+  SecureRandomNonceSource,
   ServiceIdentity,
   SystemTimeSource
 }
@@ -92,8 +93,10 @@ object Main extends IOApp:
       )
       pushTokens <- Resource.eval(GoogleAccessTokens.create(httpClient, pushAccount))
 
+      time: TimeSource[IO] = SystemTimeSource()
+      push = HttpPushSender(httpClient, pushEndpoint, pushTokens.token, time)
       senders: List[NotificationSender[IO]] = List(
-        HttpPushSender(httpClient, pushEndpoint, pushTokens.token),
+        push,
         HttpEmailSender(httpClient, emailEndpoint, settings.emailProviderKey, emailFrom)
       )
 
@@ -107,13 +110,14 @@ object Main extends IOApp:
       catalogue <- Resource.eval(JsonMessageCatalogue.load())
 
       retry: RetryPolicy[IO] = ExponentialBackoffRetry.default[IO]
-      time: TimeSource[IO] = SystemTimeSource()
       ids: NotificationIdSource[IO] = RandomNotificationIdSource()
+      nonces <- Resource.eval(SecureRandomNonceSource.create)
 
       notify = Notify[IO](
         catalogue,
         settings.templateGrants,
         directory,
+        devices,
         senders,
         repository,
         retry,
@@ -121,19 +125,27 @@ object Main extends IOApp:
         ids
       )
       getDelivery = GetDelivery[IO](repository)
-      registerDevice = RegisterDevice[IO](devices)
-      forgetDevice = ForgetDevice[IO](devices)
+      registerDevice = RegisterDevice[IO](
+        devices,
+        push,
+        nonces,
+        retry,
+        time,
+        settings.deviceLimit
+      )
+      verifyDevice = VerifyDevice[IO](devices, time, settings.deviceLimit)
       forgetOwnDevice = ForgetOwnDevice[IO](devices)
 
       service <- NotificationServiceFs2Grpc.serviceResource[IO, Caller](
-        GrpcNotificationServer(notify, getDelivery, registerDevice, forgetDevice),
+        GrpcNotificationServer(notify, getDelivery, registerDevice),
         CallerHeader.read
       )
       _ <- Resource.eval(grantsNameWhatIsServed(settings, service.getServiceDescriptor))
       _ <- Resource.eval(
         logger.info(
           s"gRPC callers: ${settings.allowedPeers.summary}; " +
-            s"templates: ${TemplateGrantList.summary(settings.templateGrants)}"
+            s"templates: ${TemplateGrantList.summary(settings.templateGrants)}; " +
+            s"devices per principal: ${settings.deviceLimit.value}"
         )
       )
       serverTls <- Resource.eval(ServiceIdentity.server(settings.pkiDir))
@@ -153,7 +165,7 @@ object Main extends IOApp:
         )
       )
 
-      devicesApi = DeviceApi(accessTokens, registerDevice, forgetOwnDevice, logger)
+      devicesApi = DeviceApi(accessTokens, registerDevice, verifyDevice, forgetOwnDevice, logger)
 
       httpPort <- Resource.eval(
         IO.fromOption(Port.fromInt(settings.httpPort))(

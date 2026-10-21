@@ -15,11 +15,11 @@ import io.grpc.reflection.v1.{
   ServerReflectionResponse
 }
 import io.grpc.stub.StreamObserver
-import munit.CatsEffectSuite
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.domain.Caller
 
-class GrpcReflectionSuite extends CatsEffectSuite:
+class GrpcReflectionSuite extends BoundedSuite:
   private val served: Resource[IO, Int] = Served.start(None).map(_.port)
 
   private def channel(port: Int): Resource[IO, ManagedChannel] =
