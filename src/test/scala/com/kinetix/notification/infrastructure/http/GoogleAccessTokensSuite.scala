@@ -6,12 +6,13 @@ import java.util.Base64
 
 import cats.effect.{IO, Ref}
 import io.circe.parser.parse
-import munit.CatsEffectSuite
 import org.http4s.*
 import org.http4s.client.Client
 import org.http4s.dsl.io.*
 
-class GoogleAccessTokensSuite extends CatsEffectSuite:
+import com.kinetix.notification.BoundedSuite
+
+class GoogleAccessTokensSuite extends BoundedSuite:
   private val keys =
     val generator = KeyPairGenerator.getInstance("RSA")
     generator.initialize(2048)

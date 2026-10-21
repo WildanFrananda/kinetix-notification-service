@@ -2,9 +2,9 @@ package com.kinetix.notification.infrastructure.observability
 
 import scala.concurrent.duration.*
 
-import munit.CatsEffectSuite
+import com.kinetix.notification.BoundedSuite
 
-class MetricsSuite extends CatsEffectSuite:
+class MetricsSuite extends BoundedSuite:
   private val seeds = List(
     MetricKey(
       Metrics.HttpRequests,

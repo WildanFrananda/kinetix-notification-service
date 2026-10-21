@@ -24,6 +24,7 @@ jobs:
   # on a push to main. Two checks with one name is a required check that can never start.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     # PostgresStoreSuite runs against this. Under CI it fails rather than skips when the database is
     # missing: the idempotency constraint and the jsonb cast live only in Postgres, and a fake

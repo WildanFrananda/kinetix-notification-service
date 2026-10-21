@@ -1,5 +1,7 @@
 package com.kinetix.notification.application
 
+import java.time.Instant
+
 import cats.Monad
 import cats.syntax.all.*
 
@@ -10,6 +12,7 @@ final class Notify[F[_]: Monad](
   catalogue: MessageCatalogue,
   grants: TemplateGrants,
   directory: RecipientDirectory[F],
+  devices: DeviceRegistry[F],
   senders: List[NotificationSender[F]],
   repository: NotificationRepository[F],
   retry: RetryPolicy[F],
@@ -109,7 +112,7 @@ final class Notify[F[_]: Monad](
     val usable = recipient.addresses.filter(address => senderFor.contains(address.channel))
 
     if preferred.isEmpty then usable
-    else preferred.distinct.flatMap(channel => usable.find(_.channel == channel))
+    else preferred.distinct.flatMap(channel => usable.filter(_.channel == channel))
 
   private def deliver(
     id: NotificationId,
@@ -117,18 +120,19 @@ final class Notify[F[_]: Monad](
     message: Message
   ): F[Either[NotificationError, NotifyOutcome]] =
     addresses
-      .traverse(address => attempt(id, address, message))
+      .map(_.channel)
+      .distinct
+      .traverse(channel => attempt(id, channel, addresses.filter(_.channel == channel), message))
       .map(attempts =>
         NotifyOutcome(id, alreadyAccepted = false, attempts).asRight[NotificationError]
       )
 
   private def attempt(
     id: NotificationId,
-    address: Address,
+    channel: Channel,
+    addresses: List[Address],
     message: Message
   ): F[DeliveryAttempt] =
-    val channel = address.channel
-
     senderFor.get(channel) match
       case None =>
         time.now.map(
@@ -143,11 +147,41 @@ final class Notify[F[_]: Monad](
 
       case Some(sender) =>
         for
-          result <- retry.retrying(sender.send(address, message))
+          results <- addresses.traverse(address => sendOnce(sender, address, message))
           at <- time.now
-          attempt = result match
-            case Right(())   => DeliveryAttempt(channel, DeliveryStatus.Sent, 1, None, at)
-            case Left(error) =>
-              DeliveryAttempt(channel, DeliveryStatus.Failed, 1, Some(error.detail), at)
+          attempt = summary(channel, results, at)
           _ <- repository.recordAttempt(id, attempt)
         yield attempt
+
+  private def sendOnce(
+    sender: NotificationSender[F],
+    address: Address,
+    message: Message
+  ): F[Either[NotificationError, Unit]] =
+    retry
+      .retrying(sender.send(address, message))
+      .flatTap:
+        case Left(NotificationError.AddressGone(_, _)) => forgetDead(address)
+        case _                                         => ().pure[F]
+
+  private def forgetDead(address: Address): F[Unit] = address match
+    case Address.Push(token) => devices.forget(token).void
+    case Address.Email(_)    => ().pure[F]
+
+  private def summary(
+    channel: Channel,
+    results: List[Either[NotificationError, Unit]],
+    at: Instant
+  ): DeliveryAttempt =
+    val failures = results.collect { case Left(error) => error.detail }.distinct
+
+    if results.exists(_.isRight) then
+      DeliveryAttempt(channel, DeliveryStatus.Sent, results.length, None, at)
+    else
+      DeliveryAttempt(
+        channel,
+        DeliveryStatus.Failed,
+        results.length,
+        Some(failures.mkString("; ")),
+        at
+      )

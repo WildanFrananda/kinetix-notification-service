@@ -1,12 +1,12 @@
 package com.kinetix.notification.application
 
 import cats.effect.IO
-import munit.CatsEffectSuite
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.domain.*
 import com.kinetix.notification.fakes.*
 
-class GetDeliverySuite extends CatsEffectSuite:
+class GetDeliverySuite extends BoundedSuite:
   private val sent = Notification(
     Fixtures.notificationId,
     Fixtures.sender,

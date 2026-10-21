@@ -39,6 +39,7 @@ build-image:
 compile:
   extends: .scala
   stage: verify
+  timeout: 20 minutes
   script:
     # -Xfatal-warnings with -Wunused:all and -Wnonunit-statement: a build that passes here is a
     # stronger statement than it is in most repositories.
@@ -50,6 +51,7 @@ compile:
 test:
   extends: .scala
   stage: test
+  timeout: 20 minutes
   # PostgresStoreSuite runs against this, and fails rather than skips under CI when it is missing.
   services:
     - name: postgres:16-alpine

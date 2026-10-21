@@ -11,8 +11,7 @@ import com.kinetix.notification.domain as model
 final class GrpcNotificationServer(
   notify: Notify[IO],
   getDelivery: GetDelivery[IO],
-  registerDevice: RegisterDevice[IO],
-  forgetDevice: ForgetDevice[IO]
+  registerDevice: RegisterDevice[IO]
 ) extends wire.NotificationServiceFs2Grpc[IO, model.Caller]:
   def notify(request: wire.NotifyRequest, caller: model.Caller): IO[wire.NotifyResponse] =
     Reads.notifyCommand(caller, request) match
@@ -55,31 +54,45 @@ final class GrpcNotificationServer(
       case (_, _, None) =>
         IO.pure(refuseRegister(model.NotificationError.InvalidPlatform))
       case (Some(principal), Some(token), Some(platform)) =>
-        registerDevice(principal, token, platform).map:
-          case Left(error)         => refuseRegister(error)
-          case Right(alreadyKnown) =>
-            wire.RegisterDeviceResponse(registered = true, alreadyRegistered = alreadyKnown)
+        registerDevice
+          .vouchedFor(principal, token, platform)
+          .map:
+            case Left(error)                                  => refuseRegister(error)
+            case Right(Registration.Registered(alreadyKnown)) =>
+              wire.RegisterDeviceResponse(registered = true, alreadyRegistered = alreadyKnown)
+            case Right(Registration.VerificationPending(until)) =>
+              wire.RegisterDeviceResponse(
+                registered = false,
+                error = Some(
+                  ErrorDetail(
+                    errorCode = Codes.VerificationPending,
+                    message = s"the handset must echo the nonce sent to it before $until"
+                  )
+                )
+              )
 
   def forgetDevice(
     request: wire.ForgetDeviceRequest,
     caller: model.Caller
   ): IO[wire.ForgetDeviceResponse] =
-    model.DeviceToken.fromString(request.deviceToken) match
-      case None =>
-        IO.pure(refuseForget(model.NotificationError.InvalidDeviceToken))
-      case Some(token) =>
-        forgetDevice(token).map:
-          case Left(error) => refuseForget(error)
-          case Right(())   => wire.ForgetDeviceResponse(forgotten = true)
+    IO.pure(
+      wire.ForgetDeviceResponse(
+        forgotten = false,
+        error = Some(
+          ErrorDetail(
+            errorCode = Codes.PrincipalRequired,
+            message = "ForgetDevice names no principal, and a token alone does not say whose " +
+              "binding to forget; nothing was forgotten"
+          )
+        )
+      )
+    )
 
   private def refuseNotify(error: model.NotificationError): wire.NotifyResponse =
     wire.NotifyResponse(accepted = false, error = Some(detail(error)))
 
   private def refuseRegister(error: model.NotificationError): wire.RegisterDeviceResponse =
     wire.RegisterDeviceResponse(registered = false, error = Some(detail(error)))
-
-  private def refuseForget(error: model.NotificationError): wire.ForgetDeviceResponse =
-    wire.ForgetDeviceResponse(forgotten = false, error = Some(detail(error)))
 
   private def detail(error: model.NotificationError): ErrorDetail =
     ErrorDetail(errorCode = Codes.of(error), message = error.detail)

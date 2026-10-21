@@ -1,10 +1,9 @@
 package com.kinetix.notification.infrastructure
 
-import munit.CatsEffectSuite
-
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.domain.{Message, Template}
 
-class JsonMessageCatalogueSuite extends CatsEffectSuite:
+class JsonMessageCatalogueSuite extends BoundedSuite:
   private val facts = Map(
     "order_number" -> "ORD-20260921-ABCD1234",
     "awb_number" -> "KNX-20260921-ABCDEFGH",

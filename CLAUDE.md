@@ -139,6 +139,21 @@ The rules are not advice here; several of them fail the build.
   saying "this token is dead" is an answer and retrying it is waste; a provider
   not answering is not an answer, and is the only case worth repeating. That
   distinction is `NotificationError.isTransient`, and `RetryPolicy` reads it.
+- **A token FCM calls dead is forgotten; any other refusal keeps it.** `AddressGone` is FCM's
+  `FcmError.errorCode` `UNREGISTERED`, or `INVALID_ARGUMENT` that either has `google.rpc.BadRequest`
+  violations naming only `message.token` or, with none, says "registration token" (FCM's documented
+  reply to a bad token). FCM reports a bad payload field as `INVALID_ARGUMENT` with a `BadRequest`
+  naming that field, an oversized message as a bare `INVALID_ARGUMENT`, and a wrong project as a 404
+  `NOT_FOUND` with no `FcmError`; none of them says anything about the token. `SENDER_ID_MISMATCH` is
+  not pruned either: a wrong credential would have it reported for every token there is. `Notify` and
+  the proof of possession both forget the token.
+- **Push goes to every handset the principal holds, and is recorded once per channel.**
+  `notification_attempts` keys on `(notification_id, channel)`, so the attempt is a summary: `SENT` if
+  any handset took it, `attempts` the number of handsets tried, and on failure every distinct reason.
+- **A principal keeps at most `MAX_DEVICES_PER_PRINCIPAL` handsets** (required, at least 1; 10 is the
+  value proposed for the estate). Registering one more forgets the least recently registered, under a
+  per-principal advisory lock, because a reinstall leaves a dead token that only a send can reveal and
+  refusing the newest handset would silence the one the person is holding.
 - **`Unreachable` is not `Failed`.** A recipient with no address on a channel is
   not a send that went wrong — there was nowhere to send to. Calling it a
   failure has somebody retrying it forever.
@@ -172,6 +187,26 @@ The rules are not advice here; several of them fail the build.
   verified here against identity's JWKS with issuer, audience and `token_use: access` — Kong's own
   check is a second lock, not the only one. The body never names a principal; one that tries is
   ignored. A handset can forget only its own token. The body is read up to 4 KiB and no further.
+  An unmatched path is a JSON 404 and a served path asked with another method a JSON 405 with `Allow`.
+- **A token another principal holds moves only after proof of possession** (the user's ruling,
+  2026-10-21). Re-pointing it at once let anyone who learnt a victim's FCM token take their pushes.
+  The claim answers 202 `DEVICE_VERIFICATION_PENDING` and sends the handset a data message
+  (`kind: DEVICE_VERIFICATION`, `nonce`, `expires_at`); the app echoes it to
+  `POST /api/v1/notifications/devices/verify` with its own access token. Only that claimant's nonce,
+  unexpired (10 minutes) and within 5 misses, moves the token, once: the row is locked `FOR UPDATE`
+  and deleted. The nonce is 32 bytes from `SecureRandom`, kept only as its SHA-256 hex. A token held by
+  nobody, or by the caller, registers at once. gRPC `RegisterDevice` names its principal instead of
+  proving it, so there every binding not already the named principal's waits for the proof. The data
+  message carries `android.ttl` and `apns-expiration` from the nonce's remaining life, so FCM and APNs
+  drop a late one instead of delivering it expired; a nonce already expired is not sent.
+- **gRPC `ForgetDevice` forgets nothing.** Its request carries only a token, and a token alone does not
+  say whose binding it is: it answers `forgotten = false`, `PRINCIPAL_REQUIRED`. Deleting by the named
+  principal waits for `principal_id` in `ForgetDeviceRequest`; the handset's `DELETE` route is unaffected.
+- **Identity's key set read too recently to read again is judged by that read.** nimbus allows two
+  reads of the JWKS per 30 s and throws `RateLimitReachedException`, a `KeySourceException`, for the
+  next unknown `kid`: the second forged or retired-key token answered 503 although identity had
+  answered. `WitnessedJWKSetSource` records whether the last real read succeeded; if it did the token
+  is invalid (401), if it failed it is still unverifiable (503).
 - **Signing keys that cannot be fetched are a 503, not a 401.** "Your token is bad" and "identity
   did not answer" are different facts; reporting the second as the first sends a logged-in user to
   log in again. `TokenVerdict.Unverifiable` carries it, from nimbus's `KeySourceException`.

@@ -7,13 +7,13 @@ import cats.effect.{IO, Resource}
 import fs2.grpc.syntax.all.*
 import io.grpc.Metadata
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
-import munit.CatsEffectSuite
 import notification.v1.notification as wire
 
+import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.fakes.Fixtures
 import com.kinetix.notification.infrastructure.observability.{Metrics, PrometheusText}
 
-class MetricsInterceptorSuite extends CatsEffectSuite:
+class MetricsInterceptorSuite extends BoundedSuite:
   private val notifyMethod: String = "notification.v1.NotificationService/Notify"
 
   private val request: wire.NotifyRequest =
