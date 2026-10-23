@@ -1,6 +1,7 @@
 package com.kinetix.notification.infrastructure.http
 
 import java.nio.charset.StandardCharsets
+import java.time.{Duration, Instant}
 
 import cats.effect.IO
 import io.circe.{Decoder, Json, parser}
@@ -17,7 +18,9 @@ import com.kinetix.notification.application.{
   VerifyDevice
 }
 import com.kinetix.notification.domain.*
+import com.kinetix.notification.domain.ports.TimeSource
 import com.kinetix.notification.infrastructure.grpc.Codes
+import com.kinetix.notification.infrastructure.retry.Backoff
 
 object DeviceApi:
   val Path: String = "/api/v1/notifications/devices"
@@ -34,8 +37,12 @@ object DeviceApi:
     register: RegisterDevice[IO],
     verify: VerifyDevice[IO],
     forget: ForgetOwnDevice[IO],
+    pushRetries: Backoff,
+    time: TimeSource[IO],
     logger: Logger[IO]
   ): HttpRoutes[IO] =
+    val failed = refusal(pushRetries, time)
+
     HttpRoutes.of[IO]:
       case request @ POST -> Root / "api" / "v1" / "notifications" / "devices" =>
         authenticated(tokens, logger, request): principal =>
@@ -47,7 +54,7 @@ object DeviceApi:
                 register
                   .signedIn(principal, token, kind)
                   .flatMap:
-                    case Left(error)                                    => failed(logger, error)
+                    case Left(error)                                    => failed(error)
                     case Right(Registration.Registered(alreadyKnown))   => registered(alreadyKnown)
                     case Right(Registration.VerificationPending(until)) =>
                       json(
@@ -67,7 +74,7 @@ object DeviceApi:
               case (_, None) => refuse(Status.BadRequest, NotificationError.InvalidNonce)
               case (Some(token), Some(nonce)) =>
                 verify(principal, token, nonce).flatMap:
-                  case Left(error) => failed(logger, error)
+                  case Left(error) => failed(error)
                   case Right(())   => registered(alreadyKnown = false)
 
       case request @ DELETE -> Root / "api" / "v1" / "notifications" / "devices" =>
@@ -77,7 +84,7 @@ object DeviceApi:
               case None        => refuse(Status.BadRequest, NotificationError.InvalidDeviceToken)
               case Some(token) =>
                 forget(principal, token).flatMap:
-                  case Left(error) => failed(logger, error)
+                  case Left(error) => failed(error)
                   case Right(())   => NoContent()
 
   private def authenticated(
@@ -123,30 +130,56 @@ object DeviceApi:
       )
     )
 
-  private def failed(logger: Logger[IO], error: NotificationError): IO[Response[IO]] =
+  private def refusal(
+    pushRetries: Backoff,
+    time: TimeSource[IO]
+  )(error: NotificationError): IO[Response[IO]] =
     error match
-      case NotificationError.StoreUnavailable(cause) =>
-        logger.error(s"the device registry could not be reached: $cause") *>
-          refuse(Status.ServiceUnavailable, error)
-      case NotificationError.SenderUnavailable(_, cause) =>
-        logger.warn(s"the push provider did not answer a proof of possession: $cause") *>
-          refuse(Status.ServiceUnavailable, error)
-      case NotificationError.SenderRejected(_, cause) =>
-        logger.error(s"the push provider refused a proof of possession: $cause") *>
-          refuse(Status.BadGateway, error)
+      case NotificationError.StoreUnavailable(_, _)  => refuse(Status.ServiceUnavailable, error)
+      case NotificationError.SenderUnavailable(_, _) =>
+        refuse(Status.ServiceUnavailable, error, unanswered(pushRetries))
+      case NotificationError.SenderRejected(_, _)              => refuse(Status.BadGateway, error)
+      case NotificationError.VerificationAlreadyPending(until) => later(time, error, until)
+      case NotificationError.VerificationLimitReached(retryAt) => later(time, error, retryAt)
       case NotificationError.AddressGone(_, _) | NotificationError.VerificationNotPending |
         NotificationError.VerificationFailed(_) =>
         refuse(Status.UnprocessableEntity, error)
       case _ => refuse(Status.BadRequest, error)
 
-  private def refuse(status: Status, error: NotificationError): IO[Response[IO]] =
+  private def unanswered(pushRetries: Backoff): String =
+    val attempts = pushRetries.attempts
+    val made = pushRetries.pauses.map(pause => s"${pause.toMillis} ms") match
+      case Nil         => "1 attempt was made"
+      case only :: Nil => s"$attempts attempts were made, with $only back-off"
+      case several     =>
+        s"$attempts attempts were made, with " +
+          s"${several.init.mkString(", ")} and ${several.last} back-off"
+
+    s"the push provider did not answer; $made; try again later"
+
+  private def later(
+    time: TimeSource[IO],
+    error: NotificationError,
+    until: Instant
+  ): IO[Response[IO]] =
+    time.now.flatMap: at =>
+      val seconds = (Duration.between(at, until).toMillis + 999) / 1000
+
+      refuse(Status.TooManyRequests, error).map(
+        _.putHeaders(Header.Raw(CIString("Retry-After"), seconds.max(1).toString))
+      )
+
+  private def refuse(status: Status, error: NotificationError, message: String): IO[Response[IO]] =
     json(
       status,
       Json.obj(
         "error" -> Json.fromString(Codes.of(error)),
-        "message" -> Json.fromString(error.detail)
+        "message" -> Json.fromString(message)
       )
     )
+
+  private def refuse(status: Status, error: NotificationError): IO[Response[IO]] =
+    refuse(status, error, error.detail)
 
   private def code(status: Status, name: String): IO[Response[IO]] =
     json(status, Json.obj("error" -> Json.fromString(name)))

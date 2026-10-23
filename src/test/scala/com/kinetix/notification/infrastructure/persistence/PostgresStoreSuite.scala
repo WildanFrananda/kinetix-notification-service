@@ -21,6 +21,7 @@ import com.kinetix.notification.domain.*
 import com.kinetix.notification.fakes.{CountingRetry, FakeAccessTokens, Fixtures}
 import com.kinetix.notification.infrastructure.config.DatabaseSettings
 import com.kinetix.notification.infrastructure.http.{DeviceApi, HttpPushSender, TokenVerdict}
+import com.kinetix.notification.infrastructure.retry.ExponentialBackoffRetry
 import com.kinetix.notification.infrastructure.{SecureRandomNonceSource, SystemTimeSource}
 
 class PostgresStoreSuite extends BoundedSuite:
@@ -78,14 +79,15 @@ class PostgresStoreSuite extends BoundedSuite:
           TRUNCATE notification_attempts,
                    notifications,
                    notification_devices,
-                   notification_device_challenges
+                   notification_device_challenges,
+                   notification_device_challenge_issues
         """.update.run
           .transact(xa)
           .void
 
   private def unavailable[A](result: Either[NotificationError, A]): Boolean = result match
-    case Left(NotificationError.StoreUnavailable(_)) => true
-    case _                                           => false
+    case Left(NotificationError.StoreUnavailable(Store.Deliveries, _)) => true
+    case _                                                             => false
 
   private val key: IdempotencyKey = IdempotencyKey.fromString("ORDER-42-PACKED").get
 
@@ -98,11 +100,18 @@ class PostgresStoreSuite extends BoundedSuite:
   private def claimed(registry: PostgresDeviceRegistry): IO[Unit] =
     for
       _ <- registry.register(Fixtures.recipient, handset, DevicePlatform.Android, limit)
-      _ <- registry.holdChallenge(
-        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
-        nonce
-      )
+      _ <- registry.holdChallenge(issuedBy(claimant, Fixtures.at), nonce, Fixtures.at)
     yield ()
+
+  private def issuedBy(who: PrincipalId, at: java.time.Instant): DeviceChallenge =
+    DeviceChallenge.issued(handset, who, DevicePlatform.Ios, at)
+
+  private def asking(bearer: String, path: String, body: String): Request[IO] =
+    Request[IO](Method.POST, Uri.unsafeFromString(path))
+      .withEntity(body)
+      .putHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, bearer)))
+
+  private val registering: String = """{"device_token":"handset-token-1","platform":"ANDROID"}"""
 
   private def sent(
     id: String,
@@ -333,29 +342,96 @@ class PostgresStoreSuite extends BoundedSuite:
         assertEquals(holder, Right(Some(Fixtures.recipient)))
   }
 
-  onPostgres("a new proof for the same claim replaces the old nonce and its count") { xa =>
+  onPostgres("a claim holds one proof until it expires, and a new one then starts afresh") { xa =>
     val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
     val wrong = DeviceNonce.fromString("guessed").get
     val fresh = DeviceNonce.fromString("a-second-nonce").get
     val during = Fixtures.at.plusSeconds(60)
+    val expiry = Fixtures.at.plus(DeviceChallenge.Lifetime)
 
     for
       _ <- claimed(registry)
       _ <- registry.redeem(claimant, handset, wrong, during, limit)
-      _ <- registry.holdChallenge(
-        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
-        fresh
-      )
-      stale <- registry.redeem(claimant, handset, nonce, during, limit)
-      counted <- sql"SELECT failed_attempts FROM notification_device_challenges"
+      again <- registry.holdChallenge(issuedBy(claimant, during), fresh, during)
+      unmoved <- sql"SELECT failed_attempts FROM notification_device_challenges"
         .query[Int]
         .unique
         .transact(xa)
-      verified <- registry.redeem(claimant, handset, fresh, during, limit)
+      renewed <- registry.holdChallenge(issuedBy(claimant, expiry), fresh, expiry)
+      stale <- registry.redeem(claimant, handset, nonce, expiry.plusSeconds(1), limit)
+      verified <- registry.redeem(claimant, handset, fresh, expiry.plusSeconds(1), limit)
     yield
+      assertEquals(again, Right(ChallengeHold.AlreadyPending(expiry)))
+      assertEquals(unmoved, 1, "a refused hold must not reset the misses")
+      assertEquals(renewed, Right(ChallengeHold.Held))
       assertEquals(stale, Right(Redemption.Refused(DeviceChallenge.MaxFailedAttempts - 1)))
-      assertEquals(counted, 1)
       assertEquals(verified, Right(Redemption.Verified))
+  }
+
+  onPostgres("a token is held at most three proofs an hour, whoever claims it") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val claimants = (1 to 4).toList.map(n => PrincipalId.fromString(s"claimant-$n").get)
+    val nonces = (1 to 5).toList.map(n => DeviceNonce.fromString(s"nonce-$n").get)
+    val hourLater = Fixtures.at.plus(DeviceChallenge.IssueWindow)
+
+    for
+      holds <- claimants
+        .zip(nonces)
+        .zipWithIndex
+        .traverse:
+          case ((who, sent), minute) =>
+            val at = Fixtures.at.plusSeconds(60L * minute)
+
+            registry.holdChallenge(issuedBy(who, at), sent, at)
+      late <- registry.holdChallenge(issuedBy(claimants(3), hourLater), nonces(4), hourLater)
+      issued <- sql"SELECT COUNT(*) FROM notification_device_challenge_issues"
+        .query[Int]
+        .unique
+        .transact(xa)
+    yield
+      assertEquals(holds.take(3), List.fill(3)(Right(ChallengeHold.Held)))
+      assertEquals(holds(3), Right(ChallengeHold.LimitReached(hourLater)))
+      assertEquals(late, Right(ChallengeHold.Held))
+      assertEquals(issued, 3, "issues older than the window are pruned when a proof is held")
+  }
+
+  onPostgres(
+    "a proof the provider did not take is released, and does not count against the token"
+  ) { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val other = DeviceNonce.fromString("someone-elses-nonce").get
+
+    for
+      _ <- claimed(registry)
+      _ <- registry.releaseChallenge(issuedBy(claimant, Fixtures.at), other)
+      kept <- sql"SELECT COUNT(*) FROM notification_device_challenges"
+        .query[Int]
+        .unique
+        .transact(xa)
+      _ <- registry.releaseChallenge(issuedBy(claimant, Fixtures.at), nonce)
+      rows <- sql"""
+          SELECT (SELECT COUNT(*) FROM notification_device_challenges),
+                 (SELECT COUNT(*) FROM notification_device_challenge_issues)
+        """.query[(Int, Int)].unique.transact(xa)
+      again <- registry.holdChallenge(issuedBy(claimant, Fixtures.at), nonce, Fixtures.at)
+    yield
+      assertEquals(kept, 1, "a release names its own nonce, and only that proof goes")
+      assertEquals(rows, (0, 0))
+      assertEquals(again, Right(ChallengeHold.Held))
+  }
+
+  onPostgres("claims of one token held at once are counted under one lock") { xa =>
+    val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+    val claimants = (1 to 8).toList.map(n => PrincipalId.fromString(s"claimant-$n").get)
+
+    val limited = ChallengeHold.LimitReached(Fixtures.at.plus(DeviceChallenge.IssueWindow))
+
+    for holds <- claimants.parTraverse(who =>
+        registry.holdChallenge(issuedBy(who, Fixtures.at), nonce, Fixtures.at)
+      )
+    yield
+      assertEquals(holds.count(_ == Right(ChallengeHold.Held)), 3)
+      assertEquals(holds.count(_ == Right(limited)), 5)
   }
 
   onPostgres("expired proofs are cleared whenever a new one is held") { xa =>
@@ -363,18 +439,16 @@ class PostgresStoreSuite extends BoundedSuite:
     val longAgo = Fixtures.at.minus(Duration.ofDays(1))
 
     for
-      _ <- registry.holdChallenge(
-        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, longAgo),
-        nonce
-      )
+      _ <- registry.holdChallenge(issuedBy(claimant, longAgo), nonce, longAgo)
       _ <- registry.holdChallenge(
         DeviceChallenge.issued(
           DeviceToken.fromString("handset-token-2").get,
           claimant,
           DevicePlatform.Ios,
-          java.time.Instant.now()
+          Fixtures.at
         ),
-        nonce
+        nonce,
+        Fixtures.at
       )
       tokens <- sql"SELECT device_token FROM notification_device_challenges"
         .query[String]
@@ -392,10 +466,7 @@ class PostgresStoreSuite extends BoundedSuite:
       claims <- tokens.traverse(registry.register(claimant, _, DevicePlatform.Android, two))
       kept <- registry.tokensFor(claimant)
       _ <- registry.register(Fixtures.recipient, handset, DevicePlatform.Android, two)
-      _ <- registry.holdChallenge(
-        DeviceChallenge.issued(handset, claimant, DevicePlatform.Ios, Fixtures.at),
-        nonce
-      )
+      _ <- registry.holdChallenge(issuedBy(claimant, Fixtures.at), nonce, Fixtures.at)
       verified <- registry.redeem(claimant, handset, nonce, Fixtures.at.plusSeconds(1), two)
       afterProof <- registry.tokensFor(claimant)
     yield
@@ -444,13 +515,6 @@ class PostgresStoreSuite extends BoundedSuite:
     )
     val time = SystemTimeSource()
 
-    def asking(bearer: String, path: String, body: String): Request[IO] =
-      Request[IO](Method.POST, Uri.unsafeFromString(path))
-        .withEntity(body)
-        .putHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, bearer)))
-
-    val registering = """{"device_token":"handset-token-1","platform":"ANDROID"}"""
-
     for
       pushed <- Ref.of[IO, List[String]](Nil)
       fcm = Client.fromHttpApp(
@@ -462,7 +526,8 @@ class PostgresStoreSuite extends BoundedSuite:
         fcm,
         Uri.unsafeFromString("https://fcm.googleapis.com/v1/projects/kinetix-test/messages:send"),
         IO.pure("access-token"),
-        time
+        time,
+        NoOpLogger[IO]
       )
       nonces <- SecureRandomNonceSource.create
       retry <- CountingRetry.upTo(1)
@@ -471,6 +536,8 @@ class PostgresStoreSuite extends BoundedSuite:
         RegisterDevice[IO](registry, push, nonces, retry, time, limit),
         VerifyDevice[IO](registry, time, limit),
         ForgetOwnDevice[IO](registry),
+        ExponentialBackoffRetry.default[IO].backoff,
+        time,
         NoOpLogger[IO]
       ).orNotFound
       held <- api.run(asking("holder", DeviceApi.Path, registering))
@@ -518,4 +585,58 @@ class PostgresStoreSuite extends BoundedSuite:
       assertEquals(verified.status, Status.Ok)
       assertEquals(after, Right(Some(claimant)))
       assertEquals(stored, Nil)
+  }
+
+  onPostgres("over HTTP, principals claiming one token at once wake its handset three times") {
+    xa =>
+      val registry = PostgresDeviceRegistry(xa, NoOpLogger[IO])
+      val claimants = (1 to 8).toList.map(n => s"claimant-$n")
+      val verdicts = claimants.map(c => c -> TokenVerdict.Valid(PrincipalId.fromString(c).get))
+      val tokens = FakeAccessTokens(
+        (("holder" -> TokenVerdict.Valid(Fixtures.recipient)) :: verdicts).toMap
+      )
+      val time = SystemTimeSource()
+
+      for
+        pushed <- Ref.of[IO, Int](0)
+        fcm = Client.fromHttpApp(HttpApp[IO](_ => pushed.update(_ + 1) *> Ok("{}")))
+        push = HttpPushSender(
+          fcm,
+          Uri.unsafeFromString("https://fcm.googleapis.com/v1/projects/kinetix-test/messages:send"),
+          IO.pure("access-token"),
+          time,
+          NoOpLogger[IO]
+        )
+        nonces <- SecureRandomNonceSource.create
+        retry <- CountingRetry.upTo(1)
+        api = DeviceApi(
+          tokens,
+          RegisterDevice[IO](registry, push, nonces, retry, time, limit),
+          VerifyDevice[IO](registry, time, limit),
+          ForgetOwnDevice[IO](registry),
+          ExponentialBackoffRetry.default[IO].backoff,
+          time,
+          NoOpLogger[IO]
+        ).orNotFound
+        _ <- api.run(asking("holder", DeviceApi.Path, registering))
+        answers <- claimants.parTraverse(c => api.run(asking(c, DeviceApi.Path, registering)))
+        accepted = claimants.zip(answers).collect {
+          case (c, answer) if answer.status == Status.Accepted => c
+        }
+        again <- api.run(
+          asking(accepted.headOption.getOrElse("holder"), DeviceApi.Path, registering)
+        )
+        againBody <- again.as[String]
+        sent <- pushed.get
+        held <- sql"SELECT COUNT(*) FROM notification_device_challenges"
+          .query[Int]
+          .unique
+          .transact(xa)
+      yield
+        assertEquals(accepted.length, 3)
+        assertEquals(answers.count(_.status == Status.TooManyRequests), 5)
+        assertEquals(again.status, Status.TooManyRequests)
+        assert(againBody.contains("VERIFICATION_ALREADY_PENDING"), againBody)
+        assertEquals(sent, 3)
+        assertEquals(held, 3)
   }

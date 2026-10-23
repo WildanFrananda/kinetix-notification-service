@@ -11,6 +11,7 @@ import com.kinetix.notification.domain.ports.DeviceRegistry
 final class FakeDeviceRegistry(
   devices: Ref[IO, Map[String, (PrincipalId, DevicePlatform, Long)]],
   challenges: Ref[IO, Map[(String, String), (DeviceChallenge, DeviceNonce)]],
+  issued: Ref[IO, List[(String, DeviceNonce, Instant)]],
   clock: Ref[IO, Long]
 ) extends DeviceRegistry[IO]:
   def tokensFor(principal: PrincipalId): IO[Either[NotificationError, List[DeviceToken]]] =
@@ -47,11 +48,33 @@ final class FakeDeviceRegistry(
 
   def holdChallenge(
     challenge: DeviceChallenge,
+    nonce: DeviceNonce,
+    at: Instant
+  ): IO[Either[NotificationError, ChallengeHold]] =
+    val key = (challenge.token.value, challenge.claimant.value)
+
+    for
+      pending <- challenges.get.map(_.get(key).map(_._1.expiresAt))
+      sent <- issued.get.map(_.collect { case (token, _, when) if token == key._1 => when })
+      verdict = DeviceChallenge.mayHold(pending, sent, at)
+      _ <- verdict match
+        case ChallengeHold.Held =>
+          challenges.update(_ + (key -> (challenge, nonce))) *>
+            issued.update(_ :+ (key._1, nonce, at))
+        case ChallengeHold.AlreadyPending(_) | ChallengeHold.LimitReached(_) => IO.unit
+    yield verdict.asRight
+
+  def releaseChallenge(
+    challenge: DeviceChallenge,
     nonce: DeviceNonce
   ): IO[Either[NotificationError, Unit]] =
-    challenges
-      .update(_ + ((challenge.token.value, challenge.claimant.value) -> (challenge, nonce)))
-      .as(().asRight)
+    val key = (challenge.token.value, challenge.claimant.value)
+
+    for
+      _ <- challenges.update: current =>
+        if current.get(key).exists(_._2.value == nonce.value) then current - key else current
+      _ <- issued.update(_.filterNot((token, sent, _) => token == key._1 && sent == nonce))
+    yield ().asRight
 
   def redeem(
     claimant: PrincipalId,
@@ -123,11 +146,17 @@ final class FakeDeviceRegistry(
 
 object FakeDeviceRegistry:
   def fresh(): FakeDeviceRegistry =
-    FakeDeviceRegistry(Ref.unsafe(Map.empty), Ref.unsafe(Map.empty), Ref.unsafe(0L))
+    FakeDeviceRegistry(
+      Ref.unsafe(Map.empty),
+      Ref.unsafe(Map.empty),
+      Ref.unsafe(Nil),
+      Ref.unsafe(0L)
+    )
 
   def empty: IO[FakeDeviceRegistry] =
     for
       devices <- Ref.of[IO, Map[String, (PrincipalId, DevicePlatform, Long)]](Map.empty)
       challenges <- Ref.of[IO, Map[(String, String), (DeviceChallenge, DeviceNonce)]](Map.empty)
+      issued <- Ref.of[IO, List[(String, DeviceNonce, Instant)]](Nil)
       clock <- Ref.of[IO, Long](0L)
-    yield FakeDeviceRegistry(devices, challenges, clock)
+    yield FakeDeviceRegistry(devices, challenges, issued, clock)

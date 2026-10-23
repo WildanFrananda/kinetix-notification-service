@@ -92,6 +92,7 @@ final class Notify[F[_]: Monad](
       case None =>
         refuse(
           NotificationError.StoreUnavailable(
+            Store.Deliveries,
             "a notification with no key was refused as a duplicate"
           )
         )
@@ -104,6 +105,7 @@ final class Notify[F[_]: Monad](
             case Right(None)           =>
               NotificationError
                 .StoreUnavailable(
+                  Store.Deliveries,
                   "the idempotency key was reported taken, but no notification holds it"
                 )
                 .asLeft

@@ -60,4 +60,8 @@ final class PostgresNotificationRepository(transactor: Transactor[IO], logger: L
       .handleErrorWith: failure =>
         logger
           .error(failure)("the notifications table could not be read or written")
-          .as(NotificationError.StoreUnavailable(PostgresFailure.describe(failure)).asLeft[A])
+          .as(
+            NotificationError
+              .StoreUnavailable(Store.Deliveries, PostgresFailure.describe(failure))
+              .asLeft[A]
+          )

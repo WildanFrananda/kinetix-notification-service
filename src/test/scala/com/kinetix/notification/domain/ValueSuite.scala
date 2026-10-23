@@ -36,7 +36,8 @@ class ValueSuite extends FunSuite:
   test("only the unknowable failures are transient") {
     assert(NotificationError.DirectoryUnavailable("x").isTransient)
     assert(NotificationError.SenderUnavailable(Channel.Push, "x").isTransient)
-    assert(NotificationError.StoreUnavailable("x").isTransient)
+    assert(NotificationError.StoreUnavailable(Store.Devices, "x").isTransient)
+    assert(NotificationError.StoreUnavailable(Store.Deliveries, "x").isTransient)
 
     assert(!NotificationError.SenderRejected(Channel.Push, "dead token").isTransient)
     assert(!NotificationError.RecipientUnknown(PrincipalId.fromString("p").get).isTransient)
@@ -86,4 +87,54 @@ class ValueSuite extends FunSuite:
 
   test("a dead address is not worth repeating") {
     assert(!NotificationError.AddressGone(Channel.Push, "404: UNREGISTERED").isTransient)
+  }
+
+  test("a store failure names the store that failed, and neither says why") {
+    val devices = NotificationError.StoreUnavailable(Store.Devices, "connection refused: db:5432")
+    val deliveries =
+      NotificationError.StoreUnavailable(Store.Deliveries, "connection refused: db:5432")
+
+    assertEquals(devices.detail, "the device registry could not be reached; try again later")
+    assertEquals(deliveries.detail, "the delivery record could not be reached; try again later")
+  }
+
+  test("no refusal repeats the words its cause was given") {
+    val cause = "projects/kinetix-commerce at fcm-egress.internal:443"
+    val carrying = List(
+      NotificationError.DirectoryUnavailable(cause),
+      NotificationError.SenderRejected(Channel.Push, cause),
+      NotificationError.SenderRejected(Channel.Email, cause),
+      NotificationError.SenderUnavailable(Channel.Push, cause),
+      NotificationError.SenderUnavailable(Channel.Email, cause),
+      NotificationError.AddressGone(Channel.Push, cause),
+      NotificationError.AddressGone(Channel.Email, cause),
+      NotificationError.StoreUnavailable(Store.Devices, cause),
+      NotificationError.StoreUnavailable(Store.Deliveries, cause)
+    )
+
+    carrying.foreach(error => assert(!error.detail.contains("kinetix-commerce"), error.detail))
+  }
+
+  test("one claim holds one proof at a time, and a token is sent three proofs an hour") {
+    val at = java.time.Instant.parse("2026-10-21T10:00:00Z")
+    val window = DeviceChallenge.IssueWindow
+    val first = at.minusSeconds(3000)
+    val sent = List(at.minusSeconds(60), first, at.minusSeconds(1200))
+
+    assertEquals(DeviceChallenge.mayHold(None, Nil, at), ChallengeHold.Held)
+    assertEquals(
+      DeviceChallenge.mayHold(Some(at.plusSeconds(30)), Nil, at),
+      ChallengeHold.AlreadyPending(at.plusSeconds(30))
+    )
+    assertEquals(DeviceChallenge.mayHold(Some(at), Nil, at), ChallengeHold.Held)
+    assertEquals(DeviceChallenge.mayHold(None, sent.take(2), at), ChallengeHold.Held)
+    assertEquals(
+      DeviceChallenge.mayHold(None, sent, at),
+      ChallengeHold.LimitReached(first.plus(window))
+    )
+    assertEquals(DeviceChallenge.mayHold(None, sent, first.plus(window)), ChallengeHold.Held)
+    assertEquals(
+      DeviceChallenge.mayHold(None, at.minus(window) :: sent.take(2), at),
+      ChallengeHold.Held
+    )
   }

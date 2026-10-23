@@ -169,6 +169,35 @@ class NotifySuite extends BoundedSuite:
       assertEquals(stored.head.attempts.head.lastError, Some(rejected.detail))
   }
 
+  test("a delivery record names the refusal and keeps the provider's own words out") {
+    val refused = NotificationError.SenderRejected(
+      Channel.Push,
+      "403: SenderId mismatch for projects/kinetix-commerce"
+    )
+    val unavailable =
+      NotificationError.SenderUnavailable(Channel.Email, "Connection refused: smtp-egress:443")
+
+    for
+      directory <- FakeDirectory.holding(Fixtures.push, Fixtures.email)
+      push <- FakeSender.answering(Channel.Push, List(Left(refused)))
+      email <- FakeSender.answering(Channel.Email, List.fill(3)(Left(unavailable)))
+      repository <- FakeRepository.empty
+      retry <- CountingRetry.upTo(3)
+      result <- notify(directory, List(push, email), repository, retry)(Fixtures.packed())
+      stored <- repository.contents
+    yield
+      val reasons = stored.flatMap(_.attempts).flatMap(_.lastError)
+
+      assertEquals(result.map(_.attempts.map(_.status)), Right(List.fill(2)(DeliveryStatus.Failed)))
+      assertEquals(
+        reasons,
+        List(
+          "the push provider refused the message; repeating the request unchanged does not help",
+          "the email provider did not answer; try again later"
+        )
+      )
+  }
+
   test("a rejection is not retried") {
     val rejected = NotificationError.SenderRejected(Channel.Email, "token is dead")
 

@@ -7,9 +7,10 @@ import io.circe.parser
 import org.http4s.*
 import org.http4s.client.Client
 import org.http4s.dsl.io.*
+import org.typelevel.log4cats.noop.NoOpLogger
 
 import com.kinetix.notification.BoundedSuite
-import com.kinetix.notification.fakes.FixedTime
+import com.kinetix.notification.fakes.{FixedTime, RecordingLogger}
 import com.kinetix.notification.domain.{
   Address,
   DeviceNonce,
@@ -43,7 +44,7 @@ class HttpPushSenderSuite extends BoundedSuite:
       seen <- Ref.of[IO, List[String]](Nil)
       rotating <- Ref.of[IO, Int](0)
       bearer = rotating.updateAndGet(_ + 1).map(n => s"token-$n")
-      sender = HttpPushSender(recording(seen, Ok("{}")), endpoint, bearer, clock)
+      sender = HttpPushSender(recording(seen, Ok("{}")), endpoint, bearer, clock, NoOpLogger[IO])
       _ <- sender.send(to, message)
       _ <- sender.send(to, message)
       sent <- seen.get
@@ -57,7 +58,8 @@ class HttpPushSenderSuite extends BoundedSuite:
         recording(seen, BadRequest("""{"error":"registration token not valid"}""")),
         endpoint,
         IO.pure("t"),
-        clock
+        clock,
+        NoOpLogger[IO]
       )
       result <- sender.send(to, message)
     yield result match
@@ -72,7 +74,8 @@ class HttpPushSenderSuite extends BoundedSuite:
         recording(seen, ServiceUnavailable("busy")),
         endpoint,
         IO.pure("t"),
-        clock
+        clock,
+        NoOpLogger[IO]
       )
       result <- sender.send(to, message)
     yield result match
@@ -84,7 +87,8 @@ class HttpPushSenderSuite extends BoundedSuite:
     Client.fromHttpApp(HttpApp[IO](_ => IO.pure(Response[IO](status).withEntity(body))))
 
   private def verdict(status: Status, body: String): IO[Either[NotificationError, Unit]] =
-    HttpPushSender(answering(status, body), endpoint, IO.pure("t"), clock).send(to, message)
+    HttpPushSender(answering(status, body), endpoint, IO.pure("t"), clock, NoOpLogger[IO])
+      .send(to, message)
 
   private def isGone(result: Either[NotificationError, Unit]): Boolean = result match
     case Left(NotificationError.AddressGone(_, _)) => true
@@ -176,7 +180,7 @@ class HttpPushSenderSuite extends BoundedSuite:
           request.bodyText.compile.string.flatMap(b => bodies.update(_ :+ b)) *> Ok("{}")
         )
       )
-      sender = HttpPushSender(client, endpoint, IO.pure("t"), clock)
+      sender = HttpPushSender(client, endpoint, IO.pure("t"), clock, NoOpLogger[IO])
       result <- sender.sendChallenge(
         DeviceToken.fromString("handset-1").getOrElse(fail("bad token")),
         nonce,
@@ -215,7 +219,13 @@ class HttpPushSenderSuite extends BoundedSuite:
 
     for
       seen <- Ref.of[IO, List[String]](Nil)
-      sender = HttpPushSender(recording(seen, Ok("{}")), endpoint, IO.pure("t"), clock)
+      sender = HttpPushSender(
+        recording(seen, Ok("{}")),
+        endpoint,
+        IO.pure("t"),
+        clock,
+        NoOpLogger[IO]
+      )
       result <- sender.sendChallenge(
         DeviceToken.fromString("handset-1").getOrElse(fail("bad token")),
         nonce,
@@ -225,4 +235,26 @@ class HttpPushSenderSuite extends BoundedSuite:
     yield
       assertEquals(sent, Nil)
       assert(result.isLeft, s"$result")
+  }
+
+  test("what the provider said is logged where it is read, at a level that says how bad it is") {
+    def logged(status: Status, body: String): IO[List[(String, String)]] =
+      for
+        logger <- RecordingLogger.empty
+        _ <- HttpPushSender(answering(status, body), endpoint, IO.pure("t"), clock, logger)
+          .send(to, message)
+        lines <- logger.lines.get
+      yield lines
+
+    for
+      gone <- logged(Status.NotFound, unregistered)
+      refused <- logged(Status.Forbidden, senderMismatch)
+      down <- logged(Status.ServiceUnavailable, "the backend is overloaded")
+    yield
+      assertEquals(gone.map(_._1), List("INFO"))
+      assert(gone.head._2.contains("UNREGISTERED"), gone.head._2)
+      assertEquals(refused.map(_._1), List("ERROR"))
+      assert(refused.head._2.contains("SenderId mismatch"), refused.head._2)
+      assertEquals(down.map(_._1), List("WARN"))
+      assert(down.head._2.contains("503: the backend is overloaded"), down.head._2)
   }

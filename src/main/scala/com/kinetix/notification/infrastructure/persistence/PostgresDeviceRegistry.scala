@@ -40,15 +40,38 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO], logger: Logger[IO
 
   def holdChallenge(
     challenge: DeviceChallenge,
-    nonce: DeviceNonce
-  ): IO[Either[NotificationError, Unit]] =
+    nonce: DeviceNonce,
+    at: Instant
+  ): IO[Either[NotificationError, ChallengeHold]] =
+    val since = at.minus(DeviceChallenge.IssueWindow)
     val hold =
       for
-        _ <- DeviceQueries.dropExpiredChallenges.run
-        _ <- DeviceQueries.holdChallenge(challenge, NonceDigest.of(nonce)).run
-      yield ()
+        _ <- DeviceQueries.lockToken(challenge.token).unique
+        _ <- DeviceQueries.dropExpiredChallenges(at).run
+        _ <- DeviceQueries.dropIssuesUpTo(since).run
+        pending <- DeviceQueries.pendingUntil(challenge.claimant, challenge.token).option
+        issued <- DeviceQueries.issuedAfter(challenge.token, since).to[List]
+        verdict = DeviceChallenge.mayHold(pending, issued, at)
+        _ <- verdict match
+          case ChallengeHold.Held => keep(challenge, NonceDigest.of(nonce), at)
+          case ChallengeHold.AlreadyPending(_) | ChallengeHold.LimitReached(_) =>
+            ().pure[ConnectionIO]
+      yield verdict
 
     run(hold)
+
+  def releaseChallenge(
+    challenge: DeviceChallenge,
+    nonce: DeviceNonce
+  ): IO[Either[NotificationError, Unit]] =
+    val digest = NonceDigest.of(nonce)
+    val release =
+      for
+        _ <- DeviceQueries.releaseChallenge(challenge, digest).run
+        _ <- DeviceQueries.forgetIssue(challenge.token, digest).run
+      yield ()
+
+    run(release)
 
   def redeem(
     claimant: PrincipalId,
@@ -92,6 +115,12 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO], logger: Logger[IO
       .flatMap:
         case 1 => DeviceQueries.evictBeyond(principal, limit).run.as(DeviceClaim.Added)
         case _ => DeviceClaim.HeldByAnother.pure[ConnectionIO]
+
+  private def keep(challenge: DeviceChallenge, digest: String, at: Instant): ConnectionIO[Unit] =
+    for
+      _ <- DeviceQueries.holdChallenge(challenge, digest).run
+      _ <- DeviceQueries.recordIssue(challenge, digest, at).run
+    yield ()
 
   private def settle(
     challenge: DeviceChallenge,
@@ -141,4 +170,8 @@ final class PostgresDeviceRegistry(transactor: Transactor[IO], logger: Logger[IO
       .handleErrorWith: failure =>
         logger
           .error(failure)("the device registry could not be read or written")
-          .as(NotificationError.StoreUnavailable(PostgresFailure.describe(failure)).asLeft[A])
+          .as(
+            NotificationError
+              .StoreUnavailable(Store.Devices, PostgresFailure.describe(failure))
+              .asLeft[A]
+          )
