@@ -18,6 +18,19 @@ RUN apt-get update \
 
 ENV PATH="/opt/sbt/bin:${PATH}"
 
+COPY security/jdk21-blocked.certs /tmp/jdk21-blocked.certs
+RUN set -eu; \
+    shipped="$JAVA_HOME/lib/security/blocked.certs"; \
+    sed 1d "$shipped" | sort > /tmp/shipped.fp; \
+    sed 1d /tmp/jdk21-blocked.certs | sort > /tmp/override.fp; \
+    if [ -n "$(comm -23 /tmp/shipped.fp /tmp/override.fp)" ]; then \
+      echo "this JDK blocks certificates security/jdk21-blocked.certs does not: remove the override"; \
+      exit 1; \
+    fi; \
+    cp /tmp/jdk21-blocked.certs "$shipped"; \
+    grep -qx 42C4ACCD12C4F59597925E1A08A7A90102608543809308D50EC427E118BA1493 "$shipped"; \
+    rm /tmp/jdk21-blocked.certs /tmp/shipped.fp /tmp/override.fp
+
 WORKDIR /build
 
 # The contracts come from the contract repository at a pinned tag, never from a copy in this
@@ -43,6 +56,19 @@ FROM eclipse-temurin:21-jre@sha256:d7051a45dd955e4d5d1db4d3f4269fe13d1c6dff8cc6b
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
+
+COPY security/jdk21-blocked.certs /tmp/jdk21-blocked.certs
+RUN set -eu; \
+    shipped="$JAVA_HOME/lib/security/blocked.certs"; \
+    sed 1d "$shipped" | sort > /tmp/shipped.fp; \
+    sed 1d /tmp/jdk21-blocked.certs | sort > /tmp/override.fp; \
+    if [ -n "$(comm -23 /tmp/shipped.fp /tmp/override.fp)" ]; then \
+      echo "this JDK blocks certificates security/jdk21-blocked.certs does not: remove the override"; \
+      exit 1; \
+    fi; \
+    cp /tmp/jdk21-blocked.certs "$shipped"; \
+    grep -qx 42C4ACCD12C4F59597925E1A08A7A90102608543809308D50EC427E118BA1493 "$shipped"; \
+    rm /tmp/jdk21-blocked.certs /tmp/shipped.fp /tmp/override.fp
 
 # Not root. A service that is compromised should not also be the user that can rewrite its own
 # image's filesystem.
