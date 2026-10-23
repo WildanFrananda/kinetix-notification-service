@@ -149,7 +149,8 @@ The rules are not advice here; several of them fail the build.
   the proof of possession both forget the token.
 - **Push goes to every handset the principal holds, and is recorded once per channel.**
   `notification_attempts` keys on `(notification_id, channel)`, so the attempt is a summary: `SENT` if
-  any handset took it, `attempts` the number of handsets tried, and on failure every distinct reason.
+  any handset took it, `attempts` the number of handsets tried, and on failure every distinct refusal,
+  in its fixed words; what the provider said is in the log.
 - **A principal keeps at most `MAX_DEVICES_PER_PRINCIPAL` handsets** (required, at least 1; 10 is the
   value proposed for the estate). Registering one more forgets the least recently registered, under a
   per-principal advisory lock, because a reinstall leaves a dead token that only a send can reveal and
@@ -199,6 +200,19 @@ The rules are not advice here; several of them fail the build.
   proving it, so there every binding not already the named principal's waits for the proof. The data
   message carries `android.ttl` and `apns-expiration` from the nonce's remaining life, so FCM and APNs
   drop a late one instead of delivering it expired; a nonce already expired is not sent.
+- **A held token is sent one proof per claim at a time, and three an hour whoever claims it**
+  (2026-10-22). Each repeated claim used to send another high-priority data message, so anyone who knew a
+  token could wake its handset as often as Kong let them, from as many accounts as they had. Now a claim
+  whose proof is still unexpired answers 429 `VERIFICATION_ALREADY_PENDING` and sends nothing, and a
+  token that has been sent `DeviceChallenge.MaxIssuedPerWindow` (3) proofs in the last
+  `IssueWindow` (1 hour, rolling) answers 429 `VERIFICATION_LIMIT_REACHED`; both carry `Retry-After`.
+  Three covers the honest cases — one person signing in on a phone another holds, and up to two more
+  tries when a data message was lost (each only after the 10-minute life of the last) — and bounds what
+  an attacker can do to a victim at 3 silent wake-ups an hour. The price: someone who knows a token can
+  spend its hour and delay a real move by up to an hour; pushes keep going to the current holder
+  meanwhile. Issued proofs are counted in `notification_device_challenge_issues` (V5) under a
+  per-token advisory lock, because the check and the insert must be one decision when claims race. A
+  proof the provider did not take (any send failure) is released and not counted: it woke nothing.
 - **gRPC `ForgetDevice` forgets nothing.** Its request carries only a token, and a token alone does not
   say whose binding it is: it answers `forgotten = false`, `PRINCIPAL_REQUIRED`. Deleting by the named
   principal waits for `principal_id` in `ForgetDeviceRequest`; the handset's `DELETE` route is unaffected.
@@ -242,9 +256,18 @@ The rules are not advice here; several of them fail the build.
   could not see it. `PostgresStoreSuite` runs against a real Postgres 16 in both CIs and fails,
   rather than skips, when CI has no database; on a laptop it is reported as ignored unless
   `NOTIFICATION_TEST_DATABASE_URL` names a database with `test` in its name, because it truncates.
-- **A store failure says so, and only in the log says why.** The driver's message is logged at ERROR
-  and kept out of what a caller receives; `GetDelivery` answers `UNAVAILABLE` when the store did
-  not answer, instead of `found = false`.
+- **A store failure says so, says which store, and only in the log says why.** The driver's message is
+  logged at ERROR and kept out of what a caller receives; `GetDelivery` answers `UNAVAILABLE` when the
+  store did not answer, instead of `found = false`. `StoreUnavailable` names its `Store`: the device
+  routes' 503 used to say "the delivery record could not be reached" when it was the device registry.
+- **No answer carries a dependency's own words** (2026-10-22). The device routes put FCM's reply or an
+  exception's text into `message` — it can name the Firebase project — and gRPC refusals and
+  `last_error` did the same with FCM's, Resend's and identity's. `NotificationError.detail` is now one
+  fixed sentence per code; the cause stays in the error only for the adapter that read it, which logs it
+  there (`HttpPushSender`, `HttpEmailSender`, `GrpcIdentityRecipientDirectory`, the Postgres adapters):
+  INFO for a dead token, WARN for no answer, ERROR for a refusal. The handset's `SENDER_UNAVAILABLE`
+  states the attempts and pauses from the `Backoff` of the policy that made them (3 attempts, 200 ms
+  then 600 ms), so the sentence cannot drift from the retry it describes.
 
 - **Readiness asks the database a real question.** A process that has bound a port is not
   a service that can work — the pool can be exhausted, the password can have rotated. The

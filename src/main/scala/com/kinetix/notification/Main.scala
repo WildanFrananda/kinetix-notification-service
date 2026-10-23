@@ -94,22 +94,23 @@ object Main extends IOApp:
       pushTokens <- Resource.eval(GoogleAccessTokens.create(httpClient, pushAccount))
 
       time: TimeSource[IO] = SystemTimeSource()
-      push = HttpPushSender(httpClient, pushEndpoint, pushTokens.token, time)
+      push = HttpPushSender(httpClient, pushEndpoint, pushTokens.token, time, logger)
       senders: List[NotificationSender[IO]] = List(
         push,
-        HttpEmailSender(httpClient, emailEndpoint, settings.emailProviderKey, emailFrom)
+        HttpEmailSender(httpClient, emailEndpoint, settings.emailProviderKey, emailFrom, logger)
       )
 
       directory: RecipientDirectory[IO] = CompositeRecipientDirectory(
         List(
-          GrpcIdentityRecipientDirectory(identity),
+          GrpcIdentityRecipientDirectory(identity, logger),
           DeviceRegistryRecipientDirectory(devices)
         )
       )
 
       catalogue <- Resource.eval(JsonMessageCatalogue.load())
 
-      retry: RetryPolicy[IO] = ExponentialBackoffRetry.default[IO]
+      backoffRetry = ExponentialBackoffRetry.default[IO]
+      retry: RetryPolicy[IO] = backoffRetry
       ids: NotificationIdSource[IO] = RandomNotificationIdSource()
       nonces <- Resource.eval(SecureRandomNonceSource.create)
 
@@ -165,7 +166,15 @@ object Main extends IOApp:
         )
       )
 
-      devicesApi = DeviceApi(accessTokens, registerDevice, verifyDevice, forgetOwnDevice, logger)
+      devicesApi = DeviceApi(
+        accessTokens,
+        registerDevice,
+        verifyDevice,
+        forgetOwnDevice,
+        backoffRetry.backoff,
+        time,
+        logger
+      )
 
       httpPort <- Resource.eval(
         IO.fromOption(Port.fromInt(settings.httpPort))(

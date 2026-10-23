@@ -1,5 +1,7 @@
 package com.kinetix.notification.infrastructure.persistence
 
+import java.time.Instant
+
 import doobie.*
 import doobie.implicits.*
 import doobie.postgres.implicits.*
@@ -84,8 +86,62 @@ private[persistence] object DeviceQueries:
          AND principal_id = ${principal.value}
     """.update
 
-  val dropExpiredChallenges: Update0 =
-    sql"DELETE FROM notification_device_challenges WHERE expires_at <= NOW()".update
+  def lockToken(token: DeviceToken): Query0[Int] =
+    val key = s"notification_device_challenges:${token.value}"
+
+    sql"SELECT 1 FROM pg_advisory_xact_lock(hashtextextended($key, 0))".query[Int]
+
+  def dropExpiredChallenges(at: Instant): Update0 =
+    sql"DELETE FROM notification_device_challenges WHERE expires_at <= $at".update
+
+  def pendingUntil(claimant: PrincipalId, token: DeviceToken): Query0[Instant] =
+    sql"""
+      SELECT expires_at
+        FROM notification_device_challenges
+       WHERE device_token = ${token.value}
+         AND claimant_principal_id = ${claimant.value}
+    """.query[Instant]
+
+  def issuedAfter(token: DeviceToken, since: Instant): Query0[Instant] =
+    sql"""
+      SELECT issued_at
+        FROM notification_device_challenge_issues
+       WHERE device_token = ${token.value}
+         AND issued_at > $since
+    """.query[Instant]
+
+  def recordIssue(challenge: DeviceChallenge, digest: String, at: Instant): Update0 =
+    sql"""
+      INSERT INTO notification_device_challenge_issues
+             (device_token, claimant_principal_id, nonce_digest, issued_at)
+      VALUES (${challenge.token.value}, ${challenge.claimant.value}, $digest, $at)
+    """.update
+
+  def forgetIssue(token: DeviceToken, digest: String): Update0 =
+    sql"""
+      DELETE FROM notification_device_challenge_issues
+       WHERE device_token = ${token.value}
+         AND nonce_digest = $digest
+    """.update
+
+  def dropIssuesUpTo(since: Instant): Update0 =
+    sql"""
+      DELETE FROM notification_device_challenge_issues
+       WHERE id IN (
+               SELECT id
+                 FROM notification_device_challenge_issues
+                WHERE issued_at <= $since
+                  FOR UPDATE SKIP LOCKED
+             )
+    """.update
+
+  def releaseChallenge(challenge: DeviceChallenge, digest: String): Update0 =
+    sql"""
+      DELETE FROM notification_device_challenges
+       WHERE device_token = ${challenge.token.value}
+         AND claimant_principal_id = ${challenge.claimant.value}
+         AND nonce_digest = $digest
+    """.update
 
   def holdChallenge(challenge: DeviceChallenge, digest: String): Update0 =
     sql"""

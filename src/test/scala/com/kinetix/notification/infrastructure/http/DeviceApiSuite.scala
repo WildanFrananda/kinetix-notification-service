@@ -2,16 +2,23 @@ package com.kinetix.notification.infrastructure.http
 
 import java.time.Duration
 
-import cats.effect.IO
+import scala.concurrent.duration.DurationInt
+
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import doobie.Transactor
+import io.circe.Json
+import org.http4s.client.Client
 import org.http4s.headers.Authorization
-import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Status, Uri}
+import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Response, Status, Uri}
 import org.typelevel.log4cats.noop.NoOpLogger
 
 import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.application.{ForgetOwnDevice, RegisterDevice, VerifyDevice}
 import com.kinetix.notification.domain.*
 import com.kinetix.notification.fakes.*
+import com.kinetix.notification.infrastructure.persistence.PostgresDeviceRegistry
+import com.kinetix.notification.infrastructure.retry.{Backoff, ExponentialBackoffRetry}
 
 class DeviceApiSuite extends BoundedSuite:
   private val other: PrincipalId =
@@ -19,13 +26,22 @@ class DeviceApiSuite extends BoundedSuite:
 
   private val limit: DeviceLimit = DeviceLimit.fromInt(3).get
 
+  private val third: PrincipalId = PrincipalId.fromString("claimant-3").get
+  private val fourth: PrincipalId = PrincipalId.fromString("claimant-4").get
+  private val fifth: PrincipalId = PrincipalId.fromString("claimant-5").get
+
   private val tokens = FakeAccessTokens(
     Map(
       "buyer" -> TokenVerdict.Valid(Fixtures.recipient),
       "other" -> TokenVerdict.Valid(other),
+      "third" -> TokenVerdict.Valid(third),
+      "fourth" -> TokenVerdict.Valid(fourth),
+      "fifth" -> TokenVerdict.Valid(fifth),
       "keys-down" -> TokenVerdict.Unverifiable("connect timed out")
     )
   )
+
+  private val project = "kinetix-commerce"
 
   private def app(
     devices: FakeDeviceRegistry,
@@ -40,6 +56,8 @@ class DeviceApiSuite extends BoundedSuite:
       RegisterDevice[IO](devices, challenges, nonces, retry, time, limit),
       VerifyDevice[IO](devices, time, limit),
       ForgetOwnDevice[IO](devices),
+      ExponentialBackoffRetry.default[IO].backoff,
+      time,
       NoOpLogger[IO]
     ).orNotFound
 
@@ -343,4 +361,236 @@ class DeviceApiSuite extends BoundedSuite:
       yield
         assertEquals(answers.map(_.status), List.fill(4)(Status.Ok))
         assertEquals(stored.keySet, Set("second", "third", "fourth"))
+  }
+
+  private def retryAfter(response: Response[IO]): Option[String] =
+    response.headers.headers.find(_.name.toString == "Retry-After").map(_.value)
+
+  private def claimedThrough(fcm: Client[IO]): IO[(Status, String)] =
+    val retry = ExponentialBackoffRetry.default[IO]
+
+    for
+      devices <- FakeDeviceRegistry.empty
+      nonces <- SequentialNonces.start
+      time <- MovableTime.at(Fixtures.at)
+      push = HttpPushSender(
+        fcm,
+        Uri.unsafeFromString(s"https://fcm.googleapis.com/v1/projects/$project/messages:send"),
+        IO.pure("access-token"),
+        time,
+        NoOpLogger[IO]
+      )
+      served = DeviceApi(
+        tokens,
+        RegisterDevice[IO](devices, push, nonces, retry, time, limit),
+        VerifyDevice[IO](devices, time, limit),
+        ForgetOwnDevice[IO](devices),
+        retry.backoff,
+        time,
+        NoOpLogger[IO]
+      ).orNotFound
+      _ <- served.run(call(Method.POST, Some("buyer"), handset))
+      claimed <- served.run(call(Method.POST, Some("other"), handset))
+      body <- claimed.as[String]
+    yield (claimed.status, body)
+
+  private def fcmAnswering(status: Status, body: String): Client[IO] =
+    Client.fromHttpApp(HttpApp[IO](_ => IO.pure(Response[IO](status).withEntity(body))))
+
+  private def refusal(code: String, message: String): String =
+    Json
+      .obj("error" -> Json.fromString(code), "message" -> Json.fromString(message))
+      .noSpaces
+
+  test("the push provider's own words never reach the handset; each refusal has its message") {
+    val unregistered =
+      s"""{"error":{"code":404,"message":"Requested entity was not found: projects/$project",""" +
+        """"status":"NOT_FOUND","details":[""" +
+        """{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
+        """"errorCode":"UNREGISTERED"}]}}"""
+    val mismatch =
+      s"""{"error":{"code":403,"message":"SenderId mismatch for projects/$project",""" +
+        """"status":"PERMISSION_DENIED","details":[""" +
+        """{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
+        """"errorCode":"SENDER_ID_MISMATCH"}]}}"""
+    val unreachable = Client[IO](_ =>
+      Resource.raiseError[IO, Response[IO], Throwable](
+        java.net.ConnectException(s"Connection refused: fcm-egress.internal:443 for $project")
+      )
+    )
+
+    for
+      gone <- claimedThrough(fcmAnswering(Status.NotFound, unregistered))
+      rejected <- claimedThrough(fcmAnswering(Status.Forbidden, mismatch))
+      overloaded <- claimedThrough(
+        fcmAnswering(Status.ServiceUnavailable, s"projects/$project is overloaded")
+      )
+      refused <- claimedThrough(unreachable)
+    yield
+      List(gone, rejected, overloaded, refused).foreach: (_, body) =>
+        assert(!body.contains(project), body)
+        assert(!body.contains("fcm-egress"), body)
+
+      assertEquals(
+        gone,
+        (
+          Status.UnprocessableEntity,
+          refusal(
+            "ADDRESS_GONE",
+            "the push provider says this device token no longer exists; " +
+              "get a fresh FCM token and register it again"
+          )
+        )
+      )
+      assertEquals(
+        rejected,
+        (
+          Status.BadGateway,
+          refusal(
+            "SENDER_REJECTED",
+            "the push provider refused the message; repeating the request unchanged does not help"
+          )
+        )
+      )
+
+      val unavailable = refusal(
+        "SENDER_UNAVAILABLE",
+        "the push provider did not answer; 3 attempts were made, with 200 ms and 600 ms " +
+          "back-off; try again later"
+      )
+
+      assertEquals(overloaded, (Status.ServiceUnavailable, unavailable))
+      assertEquals(refused, (Status.ServiceUnavailable, unavailable))
+  }
+
+  test("a device registry that did not answer says so, not that a delivery record did") {
+    val unreachable = Transactor.fromDriverManager[IO](
+      "org.postgresql.Driver",
+      "jdbc:postgresql://127.0.0.1:1/notification_test",
+      "nobody",
+      "nothing",
+      None
+    )
+    val registry = PostgresDeviceRegistry(unreachable, NoOpLogger[IO])
+    val expected = refusal(
+      "STORE_UNAVAILABLE",
+      "the device registry could not be reached; try again later"
+    )
+
+    for
+      challenges <- FakeChallengeSender.working
+      nonces <- SequentialNonces.start
+      retry <- CountingRetry.upTo(1)
+      time <- MovableTime.at(Fixtures.at)
+      served = DeviceApi(
+        tokens,
+        RegisterDevice[IO](registry, challenges, nonces, retry, time, limit),
+        VerifyDevice[IO](registry, time, limit),
+        ForgetOwnDevice[IO](registry),
+        ExponentialBackoffRetry.default[IO].backoff,
+        time,
+        NoOpLogger[IO]
+      ).orNotFound
+      answers <- List(
+        call(Method.POST, Some("buyer"), handset),
+        verifying("buyer", "nonce-1"),
+        call(Method.DELETE, Some("buyer"), """{"device_token":"handset-token-1"}""")
+      ).traverse(request => served.run(request).flatMap(r => r.as[String].map((r.status, _))))
+    yield assertEquals(answers, List.fill(3)((Status.ServiceUnavailable, expected)))
+  }
+
+  test("a claim already waiting on its proof wakes the handset no more, and is told to wait") {
+    handsets: (_, challenges, _, served) =>
+      for
+        _ <- served.run(call(Method.POST, Some("buyer"), handset))
+        first <- served.run(call(Method.POST, Some("other"), handset))
+        again <- served.run(call(Method.POST, Some("other"), handset))
+        body <- again.as[String]
+        sent <- challenges.sent.get
+      yield
+        assertEquals(first.status, Status.Accepted)
+        assertEquals(again.status, Status.TooManyRequests)
+        assert(body.contains("VERIFICATION_ALREADY_PENDING"), body)
+        assertEquals(retryAfter(again), Some(DeviceChallenge.Lifetime.getSeconds.toString))
+        assertEquals(sent.length, 1, "one claim must not wake the holder's handset twice")
+  }
+
+  test("a token is sent at most three proofs an hour, whoever claims it") {
+    handsets: (_, challenges, time, served) =>
+      for
+        _ <- served.run(call(Method.POST, Some("buyer"), handset))
+        claims <- List("other", "third", "fourth").traverse(bearer =>
+          served.run(call(Method.POST, Some(bearer), handset))
+        )
+        limited <- served.run(call(Method.POST, Some("fifth"), handset))
+        body <- limited.as[String]
+        sentWithinTheHour <- challenges.sent.get
+        _ <- time.advance(Duration.ofHours(1))
+        later <- served.run(call(Method.POST, Some("fifth"), handset))
+        sentAfter <- challenges.sent.get
+      yield
+        assertEquals(claims.map(_.status), List.fill(3)(Status.Accepted))
+        assertEquals(limited.status, Status.TooManyRequests)
+        assert(body.contains("VERIFICATION_LIMIT_REACHED"), body)
+        assertEquals(retryAfter(limited), Some("3600"))
+        assertEquals(sentWithinTheHour.length, 3)
+        assertEquals(later.status, Status.Accepted)
+        assertEquals(sentAfter.length, 4)
+  }
+
+  test("a proof the push provider did not take leaves the claimant free to claim again") {
+    val down = NotificationError.SenderUnavailable(Channel.Push, "503: busy")
+
+    for
+      devices <- FakeDeviceRegistry.empty
+      challenges <- FakeChallengeSender.answering(List.fill(3)(Left(down)))
+      time <- MovableTime.at(Fixtures.at)
+      served <- app(devices, challenges, time)
+      _ <- served.run(call(Method.POST, Some("buyer"), handset))
+      failed <- served.run(call(Method.POST, Some("other"), handset))
+      again <- served.run(call(Method.POST, Some("other"), handset))
+      sent <- challenges.sent.get
+    yield
+      assertEquals(failed.status, Status.ServiceUnavailable)
+      assertEquals(again.status, Status.Accepted)
+      assertEquals(sent.length, 4)
+  }
+
+  test("the outage message states the attempts and pauses of the policy that made them") {
+    val down = NotificationError.SenderUnavailable(Channel.Push, "503: busy")
+
+    def answered(backoff: Backoff): IO[String] =
+      for
+        devices <- FakeDeviceRegistry.empty
+        challenges <- FakeChallengeSender.answering(List.fill(4)(Left(down)))
+        nonces <- SequentialNonces.start
+        retry <- CountingRetry.upTo(backoff.attempts)
+        time <- MovableTime.at(Fixtures.at)
+        served = DeviceApi(
+          tokens,
+          RegisterDevice[IO](devices, challenges, nonces, retry, time, limit),
+          VerifyDevice[IO](devices, time, limit),
+          ForgetOwnDevice[IO](devices),
+          backoff,
+          time,
+          NoOpLogger[IO]
+        ).orNotFound
+        _ <- served.run(call(Method.POST, Some("buyer"), handset))
+        claimed <- served.run(call(Method.POST, Some("other"), handset))
+        body <- claimed.as[String]
+      yield body
+
+    for
+      once <- answered(Backoff(Nil))
+      twice <- answered(Backoff(List(1.second)))
+      four <- answered(Backoff(List(100.millis, 300.millis, 900.millis)))
+    yield
+      assert(once.contains("did not answer; 1 attempt was made; try again later"), once)
+      assert(twice.contains("2 attempts were made, with 1000 ms back-off"), twice)
+      assert(four.contains("4 attempts were made, with 100 ms, 300 ms and 900 ms back-off"), four)
+      assertEquals(
+        ExponentialBackoffRetry.default[IO].backoff,
+        Backoff(List(200.millis, 600.millis)),
+        "the reference documents 3 attempts with 200 ms and 600 ms back-off"
+      )
   }

@@ -18,6 +18,12 @@ trait DeviceRegistry[F[_]]:
 
   def holdChallenge(
     challenge: DeviceChallenge,
+    nonce: DeviceNonce,
+    at: Instant
+  ): F[Either[NotificationError, ChallengeHold]]
+
+  def releaseChallenge(
+    challenge: DeviceChallenge,
     nonce: DeviceNonce
   ): F[Either[NotificationError, Unit]]
 

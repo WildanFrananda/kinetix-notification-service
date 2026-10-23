@@ -21,6 +21,8 @@ final case class DeviceChallenge(
 object DeviceChallenge:
   val Lifetime: Duration = Duration.ofMinutes(10)
   val MaxFailedAttempts: Int = 5
+  val IssueWindow: Duration = Duration.ofHours(1)
+  val MaxIssuedPerWindow: Int = 3
 
   def issued(
     token: DeviceToken,
@@ -29,3 +31,13 @@ object DeviceChallenge:
     at: Instant
   ): DeviceChallenge =
     DeviceChallenge(token, claimant, platform, at.plus(Lifetime), 0)
+
+  def mayHold(pendingUntil: Option[Instant], issued: List[Instant], at: Instant): ChallengeHold =
+    val recent = issued.filter(_.isAfter(at.minus(IssueWindow))).sortWith(_.isBefore(_))
+
+    pendingUntil.filter(at.isBefore) match
+      case Some(until) => ChallengeHold.AlreadyPending(until)
+      case None        =>
+        if recent.length < MaxIssuedPerWindow then ChallengeHold.Held
+        else
+          ChallengeHold.LimitReached(recent(recent.length - MaxIssuedPerWindow).plus(IssueWindow))
