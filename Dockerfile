@@ -6,7 +6,7 @@
 # stage holds sbt, coursier's cache and the whole Scala compiler; none of it belongs in the image
 # that runs in production.
 
-FROM eclipse-temurin:21-jdk@sha256:4d06038800655fe1211760cd561de70ef2ed7a47f5d69255e9834414602b7026 AS build
+FROM eclipse-temurin:21-jdk@sha256:23cc5734ff46e776f51ce66eb9ee08444fd47caabec0a95b7eb6e94be2d3696d AS build
 
 ARG SBT_VERSION=1.10.7
 
@@ -51,7 +51,7 @@ RUN sbt -batch assembly \
  && jar xf /build/target/scala-3.3.4/kinetix-notification-service.jar META-INF/MANIFEST.MF \
  && grep -q '^Main-Class: com.kinetix.notification.Main' META-INF/MANIFEST.MF
 
-FROM eclipse-temurin:21-jre@sha256:d7051a45dd955e4d5d1db4d3f4269fe13d1c6dff8cc6b7ef89fc8577b96c1982 AS runtime
+FROM eclipse-temurin:21-jre@sha256:227118764cccd3c3294617061aaa93a08309c63a395eefa83e6b35032992ea99 AS runtime
 
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
