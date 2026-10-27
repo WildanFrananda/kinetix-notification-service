@@ -38,8 +38,13 @@ class ValueSuite extends FunSuite:
     assert(NotificationError.SenderUnavailable(Channel.Push, "x").isTransient)
     assert(NotificationError.StoreUnavailable(Store.Devices, "x").isTransient)
     assert(NotificationError.StoreUnavailable(Store.Deliveries, "x").isTransient)
+    assert(
+      NotificationError.SenderThrottled(Channel.Push, java.time.Instant.EPOCH, "x").isTransient
+    )
 
     assert(!NotificationError.SenderRejected(Channel.Push, "dead token").isTransient)
+    assert(!NotificationError.SenderCredentialRefused(Channel.Push, "401").isTransient)
+    assert(!NotificationError.ForeignDeviceToken("403: SENDER_ID_MISMATCH").isTransient)
     assert(!NotificationError.RecipientUnknown(PrincipalId.fromString("p").get).isTransient)
     assert(!NotificationError.NoRecipient.isTransient)
   }
@@ -106,6 +111,11 @@ class ValueSuite extends FunSuite:
       NotificationError.SenderRejected(Channel.Email, cause),
       NotificationError.SenderUnavailable(Channel.Push, cause),
       NotificationError.SenderUnavailable(Channel.Email, cause),
+      NotificationError.SenderThrottled(Channel.Push, java.time.Instant.EPOCH, cause),
+      NotificationError.SenderCredentialRefused(Channel.Push, cause),
+      NotificationError.SenderCredentialRefused(Channel.Email, cause),
+      NotificationError.SenderThrottled(Channel.Email, java.time.Instant.EPOCH, cause),
+      NotificationError.ForeignDeviceToken(cause),
       NotificationError.AddressGone(Channel.Push, cause),
       NotificationError.AddressGone(Channel.Email, cause),
       NotificationError.StoreUnavailable(Store.Devices, cause),

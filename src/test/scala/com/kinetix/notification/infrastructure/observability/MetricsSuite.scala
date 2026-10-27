@@ -3,6 +3,7 @@ package com.kinetix.notification.infrastructure.observability
 import scala.concurrent.duration.*
 
 import com.kinetix.notification.BoundedSuite
+import com.kinetix.notification.domain.Channel
 
 class MetricsSuite extends BoundedSuite:
   private val seeds = List(
@@ -126,4 +127,22 @@ class MetricsSuite extends BoundedSuite:
       metrics <- Metrics.create("kinetix-notification-service", """a"b\c""")
       body <- metrics.scrape
     yield assert(body.contains("""version="a\"b\\c""""), body)
+  }
+
+  test("provider failures are seeded at zero for what each channel can say, and counted apart") {
+    val seeds = Channel.values.toList.flatMap: channel =>
+      ProviderFailure.of(channel).map(Metrics.providerFailureKey(channel, _))
+    val family = "kinetix_notification_provider_failures_total"
+
+    for
+      metrics <- seeded
+      _ <- metrics.seed(seeds)
+      _ <- metrics.providerFailure(Channel.Email, ProviderFailure.Credential)
+      body <- metrics.scrape
+    yield
+      assert(body.contains(s"""$family{channel="email",reason="credential"} 1"""), body)
+      assert(body.contains(s"""$family{channel="push",reason="credential"} 0"""), body)
+      List("address_gone", "address_foreign", "rejected", "quota", "unavailable").foreach: reason =>
+        assert(body.contains(s"""$family{channel="push",reason="$reason"} 0"""), body)
+      assert(!body.contains(s"""$family{channel="email",reason="address_foreign"}"""), body)
   }

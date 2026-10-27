@@ -446,7 +446,7 @@ class NotifySuite extends BoundedSuite:
   }
 
   test("a refusal that does not say the token is dead keeps the handset") {
-    val refused = NotificationError.SenderRejected(Channel.Push, "403: SENDER_ID_MISMATCH")
+    val refused = NotificationError.ForeignDeviceToken("403: SENDER_ID_MISMATCH")
     val limit = DeviceLimit.fromInt(10).get
     val token = DeviceToken.fromString("handset-token-1").get
 
@@ -467,6 +467,35 @@ class NotifySuite extends BoundedSuite:
         result.map(_.attempts.map(attempt => (attempt.status, attempt.lastError))),
         Right(List((DeliveryStatus.Failed, Some(refused.detail))))
       )
+  }
+
+  test("a provider limiting sends is asked again; one refusing our credentials is not") {
+    val limited =
+      NotificationError.SenderThrottled(Channel.Push, Fixtures.at, "429: QUOTA_EXCEEDED")
+    val refused = NotificationError.SenderCredentialRefused(Channel.Push, "401: UNAUTHENTICATED")
+    val limit = DeviceLimit.fromInt(10).get
+    val token = DeviceToken.fromString("handset-token-1").get
+
+    def tried(answer: NotificationError): IO[(Int, List[String], Set[String])] =
+      for
+        devices <- FakeDeviceRegistry.empty
+        _ <- devices.register(Fixtures.recipient, token, DevicePlatform.Ios, limit)
+        directory <- FakeDirectory.holding(Fixtures.push)
+        push <- FakeSender.answering(Channel.Push, List.fill(3)(Left(answer)))
+        repository <- FakeRepository.empty
+        retry <- CountingRetry.upTo(3)
+        _ <- notify(directory, List(push), repository, retry, devices = devices)(Fixtures.packed())
+        sent <- push.sent.get
+        stored <- repository.contents
+        kept <- devices.contents
+      yield (sent.length, stored.flatMap(_.attempts).flatMap(_.lastError), kept.keySet)
+
+    for
+      quota <- tried(limited)
+      credential <- tried(refused)
+    yield
+      assertEquals(quota, (3, List(limited.detail), Set("handset-token-1")))
+      assertEquals(credential, (1, List(refused.detail), Set("handset-token-1")))
   }
 
   test("when every handset fails, the push attempt is failed and says why for each") {

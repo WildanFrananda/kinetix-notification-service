@@ -11,6 +11,12 @@ private[http] final case class FcmRefusal(
   def addressGone: Boolean =
     errorCode.contains(FcmRefusal.Unregistered) || tokenInvalid
 
+  def senderMismatch: Boolean =
+    errorCode.contains(FcmRefusal.SenderIdMismatch)
+
+  def thirdPartyAuth: Boolean =
+    errorCode.contains(FcmRefusal.ThirdPartyAuthError)
+
   private def tokenInvalid: Boolean =
     errorCode.orElse(status).contains(FcmRefusal.InvalidArgument) &&
       (namesOnlyTheToken || (violatedFields.isEmpty && errorCode.isDefined && blamesTheToken))
@@ -23,6 +29,8 @@ private[http] final case class FcmRefusal(
 
 private[http] object FcmRefusal:
   val Unregistered: String = "UNREGISTERED"
+  val SenderIdMismatch: String = "SENDER_ID_MISMATCH"
+  val ThirdPartyAuthError: String = "THIRD_PARTY_AUTH_ERROR"
   val InvalidArgument: String = "INVALID_ARGUMENT"
   val TokenField: String = "message.token"
   val TokenWording: String = "registration token"

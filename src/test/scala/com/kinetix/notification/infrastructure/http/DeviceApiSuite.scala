@@ -4,19 +4,21 @@ import java.time.Duration
 
 import scala.concurrent.duration.DurationInt
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import doobie.Transactor
 import io.circe.Json
 import org.http4s.client.Client
 import org.http4s.headers.Authorization
-import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Response, Status, Uri}
+import org.http4s.{AuthScheme, Credentials, Header, HttpApp, Method, Request, Response, Status, Uri}
+import org.typelevel.ci.CIString
 import org.typelevel.log4cats.noop.NoOpLogger
 
 import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.application.{ForgetOwnDevice, RegisterDevice, VerifyDevice}
 import com.kinetix.notification.domain.*
 import com.kinetix.notification.fakes.*
+import com.kinetix.notification.infrastructure.observability.Metrics
 import com.kinetix.notification.infrastructure.persistence.PostgresDeviceRegistry
 import com.kinetix.notification.infrastructure.retry.{Backoff, ExponentialBackoffRetry}
 
@@ -366,18 +368,23 @@ class DeviceApiSuite extends BoundedSuite:
   private def retryAfter(response: Response[IO]): Option[String] =
     response.headers.headers.find(_.name.toString == "Retry-After").map(_.value)
 
-  private def claimedThrough(fcm: Client[IO]): IO[(Status, String)] =
+  private def answerThrough(fcm: Client[IO]): IO[Response[IO]] =
+    FakeDeviceRegistry.empty.flatMap(answerThrough(fcm, _))
+
+  private def answerThrough(fcm: Client[IO], devices: FakeDeviceRegistry): IO[Response[IO]] =
     val retry = ExponentialBackoffRetry.default[IO]
 
     for
-      devices <- FakeDeviceRegistry.empty
       nonces <- SequentialNonces.start
       time <- MovableTime.at(Fixtures.at)
+      metrics <- Metrics.create("kinetix-notification-service", "test")
+      pushTokens <- RenewableBearer.start
       push = HttpPushSender(
         fcm,
         Uri.unsafeFromString(s"https://fcm.googleapis.com/v1/projects/$project/messages:send"),
-        IO.pure("access-token"),
+        pushTokens,
         time,
+        metrics,
         NoOpLogger[IO]
       )
       served = DeviceApi(
@@ -391,11 +398,38 @@ class DeviceApiSuite extends BoundedSuite:
       ).orNotFound
       _ <- served.run(call(Method.POST, Some("buyer"), handset))
       claimed <- served.run(call(Method.POST, Some("other"), handset))
-      body <- claimed.as[String]
-    yield (claimed.status, body)
+    yield claimed
+
+  private def claimedThrough(fcm: Client[IO]): IO[(Status, String)] =
+    answerThrough(fcm).flatMap(claimed => claimed.as[String].map(body => (claimed.status, body)))
 
   private def fcmAnswering(status: Status, body: String): Client[IO] =
     Client.fromHttpApp(HttpApp[IO](_ => IO.pure(Response[IO](status).withEntity(body))))
+
+  private def fcmCounting(calls: Ref[IO, Int], answer: Response[IO]): Client[IO] =
+    Client.fromHttpApp(HttpApp[IO](_ => calls.update(_ + 1).as(answer)))
+
+  private def overQuota(pause: Option[String]): Response[IO] =
+    val refused = Response[IO](Status.TooManyRequests).withEntity(
+      s"""{"error":{"code":429,"message":"Quota exceeded for projects/$project",""" +
+        """"status":"RESOURCE_EXHAUSTED","details":[""" +
+        """{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
+        """"errorCode":"QUOTA_EXCEEDED"}]}}"""
+    )
+
+    pause.fold(refused)(seconds => refused.putHeaders(Header.Raw(CIString("Retry-After"), seconds)))
+
+  private val foreignToken = refusal(
+    "ADDRESS_GONE",
+    "the push provider says this device token belongs to another app; " +
+      "get an FCM token from this app and register it"
+  )
+
+  private val credentialRefused = refusal(
+    "SENDER_UNAVAILABLE",
+    "the push provider did not accept this service's credentials; the request is not at fault; " +
+      "try again later"
+  )
 
   private def refusal(code: String, message: String): String =
     Json
@@ -413,6 +447,14 @@ class DeviceApiSuite extends BoundedSuite:
         """"status":"PERMISSION_DENIED","details":[""" +
         """{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
         """"errorCode":"SENDER_ID_MISMATCH"}]}}"""
+    val denied =
+      s"""{"error":{"code":403,"message":"Permission denied on projects/$project",""" +
+        """"status":"PERMISSION_DENIED"}}"""
+    val tooBig =
+      s"""{"error":{"code":400,"message":"Message is too big for projects/$project",""" +
+        """"status":"INVALID_ARGUMENT","details":[""" +
+        """{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
+        """"errorCode":"INVALID_ARGUMENT"}]}}"""
     val unreachable = Client[IO](_ =>
       Resource.raiseError[IO, Response[IO], Throwable](
         java.net.ConnectException(s"Connection refused: fcm-egress.internal:443 for $project")
@@ -421,13 +463,15 @@ class DeviceApiSuite extends BoundedSuite:
 
     for
       gone <- claimedThrough(fcmAnswering(Status.NotFound, unregistered))
-      rejected <- claimedThrough(fcmAnswering(Status.Forbidden, mismatch))
+      rejected <- claimedThrough(fcmAnswering(Status.BadRequest, tooBig))
+      foreign <- claimedThrough(fcmAnswering(Status.Forbidden, mismatch))
+      credential <- claimedThrough(fcmAnswering(Status.Forbidden, denied))
       overloaded <- claimedThrough(
         fcmAnswering(Status.ServiceUnavailable, s"projects/$project is overloaded")
       )
       refused <- claimedThrough(unreachable)
     yield
-      List(gone, rejected, overloaded, refused).foreach: (_, body) =>
+      List(gone, rejected, foreign, credential, overloaded, refused).foreach: (_, body) =>
         assert(!body.contains(project), body)
         assert(!body.contains("fcm-egress"), body)
 
@@ -461,6 +505,115 @@ class DeviceApiSuite extends BoundedSuite:
 
       assertEquals(overloaded, (Status.ServiceUnavailable, unavailable))
       assertEquals(refused, (Status.ServiceUnavailable, unavailable))
+      assertEquals(credential, (Status.ServiceUnavailable, credentialRefused))
+      assertEquals(foreign, (Status.UnprocessableEntity, foreignToken))
+  }
+
+  test("a token FCM says belongs to another sender is refused as gone, and kept for its holder") {
+    val mismatch =
+      """{"error":{"code":403,"message":"SenderId mismatch","status":"PERMISSION_DENIED",""" +
+        """"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError",""" +
+        """"errorCode":"SENDER_ID_MISMATCH"}]}}"""
+
+    for
+      devices <- FakeDeviceRegistry.empty
+      calls <- Ref.of[IO, Int](0)
+      claimed <- answerThrough(
+        fcmCounting(calls, Response[IO](Status.Forbidden).withEntity(mismatch)),
+        devices
+      )
+      body <- claimed.as[String]
+      made <- calls.get
+      stored <- devices.contents
+    yield
+      assertEquals(made, 1, "a token of another sender stays one, however often it is asked")
+      assertEquals((claimed.status, body), (Status.UnprocessableEntity, foreignToken))
+      assertEquals(owner(stored), Some(Fixtures.recipient))
+  }
+
+  test("an access token FCM refuses with a 401 is replaced at once, and the proof still goes out") {
+    for
+      calls <- Ref.of[IO, Int](0)
+      fcm = Client.fromHttpApp(
+        HttpApp[IO](_ =>
+          calls
+            .updateAndGet(_ + 1)
+            .map: made =>
+              if made == 1 then
+                Response[IO](Status.Unauthorized).withEntity(
+                  """{"error":{"code":401,"status":"UNAUTHENTICATED"}}"""
+                )
+              else Response[IO](Status.Ok).withEntity("{}")
+        )
+      )
+      claimed <- answerThrough(fcm)
+      made <- calls.get
+    yield
+      assertEquals(claimed.status, Status.Accepted)
+      assertEquals(made, 2)
+  }
+
+  test(
+    "FCM's quota refusal is asked again with the usual back-off, then 503 with its Retry-After"
+  ) {
+    for
+      calls <- Ref.of[IO, Int](0)
+      claimed <- answerThrough(fcmCounting(calls, overQuota(Some("30"))))
+      body <- claimed.as[String]
+      made <- calls.get
+    yield
+      assertEquals(made, 3, "a quota refusal is worth asking again")
+      assertEquals(claimed.status, Status.ServiceUnavailable)
+      assertEquals(retryAfter(claimed), Some("30"))
+      assert(!body.contains(project), body)
+      assertEquals(
+        body,
+        refusal(
+          "SENDER_UNAVAILABLE",
+          "the push provider is limiting how much this service may send; 3 attempts were made, " +
+            "with 200 ms and 600 ms back-off; try again after Retry-After"
+        )
+      )
+  }
+
+  test("a quota refusal naming no usable pause waits FCM's minute; one past an hour, an hour") {
+    for
+      calls <- Ref.of[IO, Int](0)
+      unstated <- answerThrough(fcmCounting(calls, overQuota(None)))
+      garbled <- answerThrough(fcmCounting(calls, overQuota(Some("soon"))))
+      excessive <- answerThrough(fcmCounting(calls, overQuota(Some("86400"))))
+    yield
+      assertEquals(retryAfter(unstated), Some("60"))
+      assertEquals(retryAfter(garbled), Some("60"))
+      assertEquals(retryAfter(excessive), Some("3600"))
+  }
+
+  test("FCM refusing this service's credentials is a 503 without a loop, and no Retry-After") {
+    val expired =
+      s"""{"error":{"code":401,"message":"Request had invalid credentials for projects/$project",""" +
+        """"status":"UNAUTHENTICATED"}}"""
+    val denied =
+      s"""{"error":{"code":403,"message":"Permission denied on projects/$project",""" +
+        """"status":"PERMISSION_DENIED"}}"""
+
+    for
+      calls <- Ref.of[IO, Int](0)
+      unauthorized <- answerThrough(
+        fcmCounting(calls, Response[IO](Status.Unauthorized).withEntity(expired))
+      )
+      forbidden <- answerThrough(
+        fcmCounting(calls, Response[IO](Status.Forbidden).withEntity(denied))
+      )
+      bodies <- List(unauthorized, forbidden).traverse(_.as[String])
+      made <- calls.get
+    yield
+      assertEquals(made, 3, "a 401 is asked once more with a fresh token, a 403 only once")
+      assertEquals(
+        List(unauthorized, forbidden).map(_.status),
+        List.fill(2)(Status.ServiceUnavailable)
+      )
+      assertEquals(List(unauthorized, forbidden).map(retryAfter), List(None, None))
+      assertEquals(bodies, List.fill(2)(credentialRefused))
   }
 
   test("a device registry that did not answer says so, not that a delivery record did") {

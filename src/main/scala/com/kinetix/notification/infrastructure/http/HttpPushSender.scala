@@ -21,12 +21,14 @@ import com.kinetix.notification.domain.{
   NotificationError
 }
 import com.kinetix.notification.domain.ports.{DeviceChallengeSender, NotificationSender, TimeSource}
+import com.kinetix.notification.infrastructure.observability.{Metrics, ProviderFailure}
 
 final class HttpPushSender(
   client: Client[IO],
   endpoint: Uri,
-  bearer: IO[String],
+  tokens: BearerTokens,
   time: TimeSource[IO],
+  metrics: Metrics,
   logger: Logger[IO]
 ) extends NotificationSender[IO]
     with DeviceChallengeSender[IO]:
@@ -51,14 +53,35 @@ final class HttpPushSender(
       else post(challenge(token, nonce, expiresAt, remaining))
 
   private def post(body: Json): IO[Either[NotificationError, Unit]] =
-    bearer
+    tokens.token
       .flatMap: credential =>
-        val request = Request[IO](Method.POST, endpoint)
-          .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, credential)))
-          .withEntity(body)
-
-        client.run(request).use(interpret)
+        client
+          .run(request(body, credential))
+          .use(firstAnswer(credential))
+      .flatMap:
+        case Some(answer) => IO.pure(answer)
+        case None         =>
+          tokens.token.flatMap(fresh => client.run(request(body, fresh)).use(interpret))
       .handleErrorWith(throwable => unavailable(throwable.toString))
+
+  private def request(body: Json, credential: String): Request[IO] =
+    Request[IO](Method.POST, endpoint)
+      .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, credential)))
+      .withEntity(body)
+
+  private def firstAnswer(
+    credential: String
+  )(response: Response[IO]): IO[Option[Either[NotificationError, Unit]]] =
+    if response.status == Status.Unauthorized then
+      response.bodyText.compile.string.flatMap: detail =>
+        if FcmRefusal.read(detail).thirdPartyAuth then judge(response, detail).map(Some(_))
+        else stale(credential, reported(response.status, detail)).as(None)
+    else interpret(response).map(Some(_))
+
+  private def stale(credential: String, cause: String): IO[Unit] =
+    logger.warn(
+      s"the push provider refused the access token in hand; asking once more with a fresh one: $cause"
+    ) *> tokens.discard(credential)
 
   private def notification(token: DeviceToken, message: Message): Json =
     Json.obj(
@@ -102,29 +125,79 @@ final class HttpPushSender(
 
   private def interpret(response: Response[IO]): IO[Either[NotificationError, Unit]] =
     if response.status.isSuccess then IO.pure(().asRight)
-    else
-      response.bodyText.compile.string.flatMap: detail =>
-        val trimmed = if detail.length > 300 then detail.take(300) else detail
-        val reported = s"${response.status.code}: $trimmed"
+    else response.bodyText.compile.string.flatMap(judge(response, _))
 
-        if response.status.responseClass == Status.ServerError then unavailable(reported)
-        else if FcmRefusal.read(detail).addressGone then gone(reported)
-        else rejected(reported)
+  private def judge(response: Response[IO], detail: String): IO[Either[NotificationError, Unit]] =
+    val cause = reported(response.status, detail)
+    val refusal = FcmRefusal.read(detail)
+
+    response.status match
+      case status if status.responseClass == Status.ServerError => unavailable(cause)
+      case Status.TooManyRequests      => throttled(cause, ProviderPause.asked(response.headers))
+      case _ if refusal.senderMismatch => foreign(cause)
+      case Status.Unauthorized | Status.Forbidden => credentialRefused(cause)
+      case _ if refusal.addressGone               => gone(cause)
+      case _                                      => rejected(cause)
+
+  private def reported(status: Status, detail: String): String =
+    s"${status.code}: ${detail.take(300)}"
 
   private def unavailable(cause: String): IO[Either[NotificationError, Unit]] =
-    logger
-      .warn(s"the push provider did not answer: $cause")
-      .as(NotificationError.SenderUnavailable(Channel.Push, cause).asLeft)
+    failed(ProviderFailure.Unavailable) *>
+      logger
+        .warn(s"the push provider did not answer: $cause")
+        .as(NotificationError.SenderUnavailable(Channel.Push, cause).asLeft)
+
+  private def throttled(
+    cause: String,
+    asked: Option[Either[HttpDate, Long]]
+  ): IO[Either[NotificationError, Unit]] =
+    time.now.flatMap: at =>
+      val pause = ProviderPause.of(asked, at, HttpPushSender.UnstatedQuotaPause)
+
+      failed(ProviderFailure.Quota) *>
+        logger
+          .warn(
+            s"the push provider is limiting this service's sends and asks for a pause of " +
+              s"${pause.getSeconds} s: $cause"
+          )
+          .as(NotificationError.SenderThrottled(Channel.Push, at.plus(pause), cause).asLeft)
+
+  private def credentialRefused(cause: String): IO[Either[NotificationError, Unit]] =
+    failed(ProviderFailure.Credential) *>
+      logger
+        .error(
+          "the push provider refused this service's own credentials; check " +
+            "PUSH_PROVIDER_CREDENTIALS_B64 and the service account's permission to send in its " +
+            s"Firebase project: $cause"
+        )
+        .as(NotificationError.SenderCredentialRefused(Channel.Push, cause).asLeft)
 
   private def rejected(cause: String): IO[Either[NotificationError, Unit]] =
-    logger
-      .error(s"the push provider refused a message: $cause")
-      .as(NotificationError.SenderRejected(Channel.Push, cause).asLeft)
+    failed(ProviderFailure.Rejected) *>
+      logger
+        .error(s"the push provider refused a message: $cause")
+        .as(NotificationError.SenderRejected(Channel.Push, cause).asLeft)
+
+  private def foreign(cause: String): IO[Either[NotificationError, Unit]] =
+    failed(ProviderFailure.AddressForeign) *>
+      logger
+        .warn(
+          "the push provider says a device token belongs to another app; if every token says so, " +
+            "PUSH_PROVIDER_URL and PUSH_PROVIDER_CREDENTIALS_B64 name the wrong Firebase project: " +
+            cause
+        )
+        .as(NotificationError.ForeignDeviceToken(cause).asLeft)
+
+  private def failed(failure: ProviderFailure): IO[Unit] =
+    metrics.providerFailure(Channel.Push, failure)
 
   private def gone(cause: String): IO[Either[NotificationError, Unit]] =
-    logger
-      .info(s"the push provider says a device token no longer exists: $cause")
-      .as(NotificationError.AddressGone(Channel.Push, cause).asLeft)
+    failed(ProviderFailure.AddressGone) *>
+      logger
+        .info(s"the push provider says a device token no longer exists: $cause")
+        .as(NotificationError.AddressGone(Channel.Push, cause).asLeft)
 
 object HttpPushSender:
   val ChallengeKind: String = "DEVICE_VERIFICATION"
+  val UnstatedQuotaPause: Duration = Duration.ofSeconds(60)

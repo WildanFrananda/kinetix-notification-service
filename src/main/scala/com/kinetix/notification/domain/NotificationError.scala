@@ -14,7 +14,10 @@ enum NotificationError:
   case NoChannelAvailable(principal: PrincipalId)
   case SenderRejected(channel: Channel, cause: String)
   case SenderUnavailable(channel: Channel, cause: String)
+  case SenderThrottled(channel: Channel, retryAt: Instant, cause: String)
+  case SenderCredentialRefused(channel: Channel, cause: String)
   case AddressGone(channel: Channel, cause: String)
+  case ForeignDeviceToken(cause: String)
   case StoreUnavailable(store: Store, cause: String)
   case InvalidDeviceToken
   case InvalidPlatform
@@ -40,11 +43,19 @@ enum NotificationError:
     case NoChannelAvailable(p) => s"no usable address for ${p.value} on any channel"
     case SenderRejected(c, _)  =>
       s"the ${provider(c)} refused the message; repeating the request unchanged does not help"
-    case SenderUnavailable(c, _)      => s"the ${provider(c)} did not answer; try again later"
+    case SenderUnavailable(c, _)  => s"the ${provider(c)} did not answer; try again later"
+    case SenderThrottled(c, _, _) =>
+      s"the ${provider(c)} is limiting how much this service may send; try again later"
+    case SenderCredentialRefused(c, _) =>
+      s"the ${provider(c)} did not accept this service's credentials; " +
+        "the request is not at fault; try again later"
     case AddressGone(Channel.Push, _) =>
       "the push provider says this device token no longer exists; " +
         "get a fresh FCM token and register it again"
     case AddressGone(Channel.Email, _) => "the email provider says this address no longer exists"
+    case ForeignDeviceToken(_)         =>
+      "the push provider says this device token belongs to another app; " +
+        "get an FCM token from this app and register it"
     case StoreUnavailable(Store.Deliveries, _) =>
       "the delivery record could not be reached; try again later"
     case StoreUnavailable(Store.Devices, _) =>
@@ -65,10 +76,11 @@ enum NotificationError:
         s"register again after $retryAt"
 
   def isTransient: Boolean = this match
-    case DirectoryUnavailable(_) => true
-    case SenderUnavailable(_, _) => true
-    case StoreUnavailable(_, _)  => true
-    case _                       => false
+    case DirectoryUnavailable(_)  => true
+    case SenderUnavailable(_, _)  => true
+    case SenderThrottled(_, _, _) => true
+    case StoreUnavailable(_, _)   => true
+    case _                        => false
 
   private def provider(channel: Channel): String = channel match
     case Channel.Push  => "push provider"

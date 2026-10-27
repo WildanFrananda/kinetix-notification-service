@@ -138,36 +138,51 @@ object DeviceApi:
       case NotificationError.StoreUnavailable(_, _)  => refuse(Status.ServiceUnavailable, error)
       case NotificationError.SenderUnavailable(_, _) =>
         refuse(Status.ServiceUnavailable, error, unanswered(pushRetries))
+      case NotificationError.SenderThrottled(_, retryAt, _) =>
+        retryingAt(time, retryAt, refuse(Status.ServiceUnavailable, error, limited(pushRetries)))
+      case NotificationError.SenderCredentialRefused(_, _) =>
+        refuse(Status.ServiceUnavailable, error)
       case NotificationError.SenderRejected(_, _)              => refuse(Status.BadGateway, error)
       case NotificationError.VerificationAlreadyPending(until) => later(time, error, until)
       case NotificationError.VerificationLimitReached(retryAt) => later(time, error, retryAt)
-      case NotificationError.AddressGone(_, _) | NotificationError.VerificationNotPending |
-        NotificationError.VerificationFailed(_) =>
+      case NotificationError.AddressGone(_, _) | NotificationError.ForeignDeviceToken(_) |
+        NotificationError.VerificationNotPending | NotificationError.VerificationFailed(_) =>
         refuse(Status.UnprocessableEntity, error)
       case _ => refuse(Status.BadRequest, error)
 
   private def unanswered(pushRetries: Backoff): String =
+    s"the push provider did not answer; ${made(pushRetries)}; try again later"
+
+  private def limited(pushRetries: Backoff): String =
+    "the push provider is limiting how much this service may send; " +
+      s"${made(pushRetries)}; try again after Retry-After"
+
+  private def made(pushRetries: Backoff): String =
     val attempts = pushRetries.attempts
-    val made = pushRetries.pauses.map(pause => s"${pause.toMillis} ms") match
+
+    pushRetries.pauses.map(pause => s"${pause.toMillis} ms") match
       case Nil         => "1 attempt was made"
       case only :: Nil => s"$attempts attempts were made, with $only back-off"
       case several     =>
         s"$attempts attempts were made, with " +
           s"${several.init.mkString(", ")} and ${several.last} back-off"
 
-    s"the push provider did not answer; $made; try again later"
-
   private def later(
     time: TimeSource[IO],
     error: NotificationError,
     until: Instant
   ): IO[Response[IO]] =
+    retryingAt(time, until, refuse(Status.TooManyRequests, error))
+
+  private def retryingAt(
+    time: TimeSource[IO],
+    until: Instant,
+    answer: IO[Response[IO]]
+  ): IO[Response[IO]] =
     time.now.flatMap: at =>
       val seconds = (Duration.between(at, until).toMillis + 999) / 1000
 
-      refuse(Status.TooManyRequests, error).map(
-        _.putHeaders(Header.Raw(CIString("Retry-After"), seconds.max(1).toString))
-      )
+      answer.map(_.putHeaders(Header.Raw(CIString("Retry-After"), seconds.max(1).toString)))
 
   private def refuse(status: Status, error: NotificationError, message: String): IO[Response[IO]] =
     json(

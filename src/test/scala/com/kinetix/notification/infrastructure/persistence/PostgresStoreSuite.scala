@@ -18,9 +18,10 @@ import org.typelevel.log4cats.noop.NoOpLogger
 import com.kinetix.notification.BoundedSuite
 import com.kinetix.notification.application.{ForgetOwnDevice, RegisterDevice, VerifyDevice}
 import com.kinetix.notification.domain.*
-import com.kinetix.notification.fakes.{CountingRetry, FakeAccessTokens, Fixtures}
+import com.kinetix.notification.fakes.{CountingRetry, FakeAccessTokens, Fixtures, RenewableBearer}
 import com.kinetix.notification.infrastructure.config.DatabaseSettings
 import com.kinetix.notification.infrastructure.http.{DeviceApi, HttpPushSender, TokenVerdict}
+import com.kinetix.notification.infrastructure.observability.Metrics
 import com.kinetix.notification.infrastructure.retry.ExponentialBackoffRetry
 import com.kinetix.notification.infrastructure.{SecureRandomNonceSource, SystemTimeSource}
 
@@ -522,11 +523,14 @@ class PostgresStoreSuite extends BoundedSuite:
           request.bodyText.compile.string.flatMap(body => pushed.update(_ :+ body)) *> Ok("{}")
         )
       )
+      metrics <- Metrics.create("kinetix-notification-service", "test")
+      pushTokens <- RenewableBearer.start
       push = HttpPushSender(
         fcm,
         Uri.unsafeFromString("https://fcm.googleapis.com/v1/projects/kinetix-test/messages:send"),
-        IO.pure("access-token"),
+        pushTokens,
         time,
+        metrics,
         NoOpLogger[IO]
       )
       nonces <- SecureRandomNonceSource.create
@@ -600,11 +604,14 @@ class PostgresStoreSuite extends BoundedSuite:
       for
         pushed <- Ref.of[IO, Int](0)
         fcm = Client.fromHttpApp(HttpApp[IO](_ => pushed.update(_ + 1) *> Ok("{}")))
+        metrics <- Metrics.create("kinetix-notification-service", "test")
+        pushTokens <- RenewableBearer.start
         push = HttpPushSender(
           fcm,
           Uri.unsafeFromString("https://fcm.googleapis.com/v1/projects/kinetix-test/messages:send"),
-          IO.pure("access-token"),
+          pushTokens,
           time,
+          metrics,
           NoOpLogger[IO]
         )
         nonces <- SecureRandomNonceSource.create

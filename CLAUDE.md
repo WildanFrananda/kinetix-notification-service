@@ -139,14 +139,44 @@ The rules are not advice here; several of them fail the build.
   saying "this token is dead" is an answer and retrying it is waste; a provider
   not answering is not an answer, and is the only case worth repeating. That
   distinction is `NotificationError.isTransient`, and `RetryPolicy` reads it.
+- **A provider's quota and credential refusals are not the request's fault** (2026-10-27). A 429 and
+  a 401/403 from FCM or Resend used to be `SenderRejected`, answered 502 "repeating the request
+  unchanged does not help" and never retried. A 429 is now `SenderThrottled`: transient, so
+  `RetryPolicy` asks again with the usual back-off, and once it is spent the device route answers 503
+  `SENDER_UNAVAILABLE` with `Retry-After` from the provider's own header (seconds or an HTTP date), never more than an hour
+  (`ProviderPause.Longest`, FCM's horizon for calling it an outage). With no readable header the pause
+  is the provider's documented one: 60 s for FCM (its wait for a 429 without `retry-after`), 1 s for
+  Resend (its limit is per second). The service had no `Retry-After` on a 503 before, so neither value
+  is ours. A 401/403 is `SenderCredentialRefused`: 503 `SENDER_UNAVAILABLE` with no `Retry-After`, not
+  transient, so it is not asked again in a loop, logged at ERROR naming the setting to check
+  (`PUSH_PROVIDER_CREDENTIALS_B64`; `EMAIL_PROVIDER_KEY` and the `EMAIL_FROM_ADDRESS` domain, since
+  Resend's 403 also covers an unverified sender domain). Other 4xx that are not a dead token stay 502
+  `SENDER_REJECTED`. Every failed send is counted in
+  `kinetix_notification_provider_failures_total{channel, reason}` (`address_gone`, `address_foreign`,
+  `rejected`, `quota`, `credential`, `unavailable`), seeded at zero for what each channel can say; any
+  `credential` is an operator's job.
+- **A 401 from FCM drops the access token in hand and asks once more at once** (2026-10-27). Google
+  can revoke a token before the hour `GoogleAccessTokens` holds it for, and every push until then was
+  refused. `HttpPushSender` takes `BearerTokens`, whose `discard` forgets the cached token only if it
+  is still the refused one (a concurrent send may already hold a fresh one); the second ask uses a
+  fresh token, and only its refusal is `SenderCredentialRefused`, logged and counted. A 403 is a
+  permission and keeps the token, and so does a 401 `THIRD_PARTY_AUTH_ERROR`, which is the APNs or web
+  push key in the Firebase project, not ours.
+- **`SENDER_ID_MISMATCH` is the token's, answered as `ADDRESS_GONE`, and not pruned** (2026-10-27).
+  FCM's 403 with that `FcmError.errorCode` says the token was issued for another sender: a client that
+  sent it must get a token from this app, which is what `ADDRESS_GONE` tells it, so the device route
+  answers 422 `ADDRESS_GONE` with its own sentence (`ForeignDeviceToken`), not 503 and not 502, which
+  says nothing about what to do. It is not transient. Unlike `AddressGone`, the token is kept for
+  whoever holds it: if `PUSH_PROVIDER_URL` and the credential ever both named the wrong Firebase
+  project, every token would say this, and forgetting them would wipe every registration. The log says
+  so at WARN and `address_foreign` counts it, so a burst is visible.
 - **A token FCM calls dead is forgotten; any other refusal keeps it.** `AddressGone` is FCM's
   `FcmError.errorCode` `UNREGISTERED`, or `INVALID_ARGUMENT` that either has `google.rpc.BadRequest`
   violations naming only `message.token` or, with none, says "registration token" (FCM's documented
   reply to a bad token). FCM reports a bad payload field as `INVALID_ARGUMENT` with a `BadRequest`
   naming that field, an oversized message as a bare `INVALID_ARGUMENT`, and a wrong project as a 404
   `NOT_FOUND` with no `FcmError`; none of them says anything about the token. `SENDER_ID_MISMATCH` is
-  not pruned either: a wrong credential would have it reported for every token there is. `Notify` and
-  the proof of possession both forget the token.
+  not pruned either (see above). `Notify` and the proof of possession both forget the token.
 - **Push goes to every handset the principal holds, and is recorded once per channel.**
   `notification_attempts` keys on `(notification_id, channel)`, so the attempt is a summary: `SENT` if
   any handset took it, `attempts` the number of handsets tried, and on failure every distinct refusal,
@@ -165,7 +195,7 @@ The rules are not advice here; several of them fail the build.
   sudah dikemas" with a hole in it is a worse message than no message: the
   recipient cannot act on it and cannot tell that anything is wrong.
 - **Push is FCM HTTP v1, and its credential expires every hour.** `HttpPushSender` takes
-  `bearer: IO[String]`, not an API key: `GoogleAccessTokens` signs an RS256 assertion with
+  `BearerTokens`, not an API key: `GoogleAccessTokens` signs an RS256 assertion with
   the service account key and exchanges it for an access token, holding that token until a
   minute before it expires. The key-in-a-header form belonged to the legacy FCM endpoint,
   which Google retired in July 2024 — a static credential there does not degrade, it returns
@@ -292,6 +322,8 @@ The rules are not advice here; several of them fail the build.
   as the notary does. It did not at first — the workflow was copied from search, which serves no
   `/metrics` — so v1.0.1 reported `version="unknown"`, `metrics_conformance` refused it, and the deploy
   rolled back. The workflow now fails before pushing if the image does not carry its own sha.
+  `VERSION` is sbt's `version` only and names the release about to be tagged: it is bumped in the tree
+  before the tag, as v1.0.1 and v1.0.2 did. It stayed at 1.0.2 through v1.3.2; set to 1.3.3 on 2026-10-27.
 - **Every metric label is bounded by construction.** A route label is one of
   `HttpApi.Routes` or the single `unmatched` bucket — never the path as asked for. Only
   `HttpApi.Probes` are seeded at start; the device routes appear once a handset uses them. An id in
