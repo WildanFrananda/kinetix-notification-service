@@ -55,8 +55,11 @@ than a fact about a person.
 ## Two distinctions the code keeps
 
 **A provider that said no, against a provider that did not answer.** A dead token is an answer, and
-repeating it is waste; a dropped connection is not an answer, and is the one case worth retrying.
-`NotificationError.isTransient` is where that lives.
+repeating it is waste; a dropped connection is not an answer, and neither is "too many for now" (a
+429): those are the cases worth retrying. `NotificationError.isTransient` is where that lives. A
+provider refusing this service's own credentials is no answer about the request either: the caller gets
+a 503 and an operator gets the error log and `kinetix_notification_provider_failures_total`. A token FCM
+says belongs to another app is the caller's to replace, like a dead one, but it is not forgotten.
 
 **Nowhere to send, against a send that failed.** A recipient with no address is `Unreachable` and no
 record is written — a notification to nobody is not a notification. A send that was attempted and

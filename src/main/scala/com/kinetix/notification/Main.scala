@@ -20,7 +20,7 @@ import identity.v1.identity.{IdentityServiceFs2Grpc, IdentityServiceGrpc}
 import notification.v1.notification.NotificationServiceFs2Grpc
 
 import com.kinetix.notification.application.*
-import com.kinetix.notification.domain.{Caller, EmailAddress}
+import com.kinetix.notification.domain.{Caller, Channel, EmailAddress}
 import com.kinetix.notification.domain.ports.*
 import com.kinetix.notification.infrastructure.{
   JsonMessageCatalogue,
@@ -41,7 +41,7 @@ import com.kinetix.notification.infrastructure.http.{
   HttpPushSender,
   NimbusAccessTokenVerifier
 }
-import com.kinetix.notification.infrastructure.observability.{MetricKey, Metrics}
+import com.kinetix.notification.infrastructure.observability.{MetricKey, Metrics, ProviderFailure}
 import com.kinetix.notification.infrastructure.persistence.{
   PostgresDeviceRegistry,
   PostgresNotificationRepository,
@@ -94,10 +94,18 @@ object Main extends IOApp:
       pushTokens <- Resource.eval(GoogleAccessTokens.create(httpClient, pushAccount))
 
       time: TimeSource[IO] = SystemTimeSource()
-      push = HttpPushSender(httpClient, pushEndpoint, pushTokens.token, time, logger)
+      push = HttpPushSender(httpClient, pushEndpoint, pushTokens, time, metrics, logger)
       senders: List[NotificationSender[IO]] = List(
         push,
-        HttpEmailSender(httpClient, emailEndpoint, settings.emailProviderKey, emailFrom, logger)
+        HttpEmailSender(
+          httpClient,
+          emailEndpoint,
+          settings.emailProviderKey,
+          emailFrom,
+          time,
+          metrics,
+          logger
+        )
       )
 
       directory: RecipientDirectory[IO] = CompositeRecipientDirectory(
@@ -215,7 +223,9 @@ object Main extends IOApp:
         )
       )
     )
-    http ++ served ++ called
+    val failed = Channel.values.toList.flatMap: channel =>
+      ProviderFailure.of(channel).map(Metrics.providerFailureKey(channel, _))
+    http ++ served ++ called ++ failed
 
   private def grantsNameWhatIsServed(
     settings: Settings,

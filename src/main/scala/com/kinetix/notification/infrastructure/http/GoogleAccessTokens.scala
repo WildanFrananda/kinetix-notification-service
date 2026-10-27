@@ -16,7 +16,7 @@ final class GoogleAccessTokens private (
   account: GoogleServiceAccount,
   scope: String,
   held: Ref[IO, Option[HeldToken]]
-):
+) extends BearerTokens:
   val token: IO[String] =
     for
       now <- Clock[IO].realTimeInstant
@@ -25,6 +25,9 @@ final class GoogleAccessTokens private (
         case Some(existing) if existing.usableAt(now) => IO.pure(existing.value)
         case _                                        => refresh(now)
     yield value
+
+  def discard(refused: String): IO[Unit] =
+    held.update(_.filterNot(_.value == refused))
 
   private def refresh(now: Instant): IO[String] =
     for

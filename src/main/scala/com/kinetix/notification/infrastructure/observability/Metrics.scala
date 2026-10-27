@@ -4,6 +4,8 @@ import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.{IO, Ref}
 
+import com.kinetix.notification.domain.Channel
+
 final class Metrics private (
   counters: Ref[IO, Map[MetricKey, Long]],
   histograms: Ref[IO, Map[MetricKey, HistogramSample]],
@@ -32,6 +34,9 @@ final class Metrics private (
         List("peer" -> peer, "grpc_method" -> grpcMethod, "grpc_code" -> code)
       )
     )
+
+  def providerFailure(channel: Channel, failure: ProviderFailure): IO[Unit] =
+    count(Metrics.providerFailureKey(channel, failure))
 
   def seed(keys: List[MetricKey]): IO[Unit] =
     val counterSeeds = keys.filterNot(_.name == Metrics.HttpDuration)
@@ -98,6 +103,12 @@ final class Metrics private (
         "counter",
         "gRPC calls this service made to another service.",
         counterLines(Metrics.GrpcClientCalls, counted)
+      ),
+      family(
+        Metrics.ProviderFailures,
+        "counter",
+        "Sends a push or email provider did not take, by channel and reason; each retry counts.",
+        counterLines(Metrics.ProviderFailures, counted)
       )
     ).mkString
 
@@ -132,6 +143,14 @@ object Metrics:
   val GrpcServerCalls: String = "kinetix_grpc_server_calls_total"
   val GrpcClientCalls: String = "kinetix_grpc_client_calls_total"
   val BuildInfo: String = "kinetix_build_info"
+  val ProviderFailures: String = "kinetix_notification_provider_failures_total"
+
+  def providerFailureKey(channel: Channel, failure: ProviderFailure): MetricKey =
+    MetricKey(ProviderFailures, List("channel" -> channelLabel(channel), "reason" -> failure.label))
+
+  private def channelLabel(channel: Channel): String = channel match
+    case Channel.Push  => "push"
+    case Channel.Email => "email"
 
   val ContentType: String = "text/plain; version=0.0.4; charset=utf-8"
 

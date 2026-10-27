@@ -48,6 +48,15 @@ class GoogleAccessTokensSuite extends BoundedSuite:
         yield response
     )
 
+  private def numbered(bought: Ref[IO, Int]): Client[IO] =
+    Client.fromHttpApp(
+      HttpApp[IO]: _ =>
+        bought
+          .updateAndGet(_ + 1)
+          .flatMap(n => Ok(s"""{"access_token":"token-$n","expires_in":3600}"""))
+          .map(_.withContentType(headers.`Content-Type`(MediaType.application.json)))
+    )
+
   test("a key that is not base64 is refused by name") {
     GoogleServiceAccount
       .fromBase64("PUSH_PROVIDER_CREDENTIALS_B64", "not base64 at all!!")
@@ -139,6 +148,22 @@ class GoogleAccessTokensSuite extends BoundedSuite:
     yield
       assertEquals(first, second)
       assertEquals(sent.size, 1, "the token endpoint was asked twice for one live token")
+  }
+
+  test("a token the provider refused is dropped and bought again; a stale refusal drops nothing") {
+    for
+      bought <- Ref.of[IO, Int](0)
+      parsed <- account
+      tokens <- GoogleAccessTokens.create(numbered(bought), parsed)
+      first <- tokens.token
+      _ <- tokens.discard(first)
+      second <- tokens.token
+      _ <- tokens.discard(first)
+      third <- tokens.token
+      exchanges <- bought.get
+    yield
+      assertEquals((first, second, third), ("token-1", "token-2", "token-2"))
+      assertEquals(exchanges, 2)
   }
 
   test("a token inside the refresh margin is replaced before a notification finds out") {
