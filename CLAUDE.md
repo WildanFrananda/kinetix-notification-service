@@ -393,3 +393,21 @@ the file does not: that is a newer JDK, and the override must then be deleted, n
 on 2026-10-23 against a test server whose chain runs through `EM DV TLS CA - G3B`: the image before the override
 connected (HTTP 200), the image with it refused (`Untrusted certificate`), and Midtrans, FCM, Google OAuth and Resend still
 connected. Delete the file and both steps when the base image's JDK is 21.0.13.0.2 or later.
+
+## The heap percentage is a deployment setting, not an image constant
+
+`-XX:MaxRAMPercentage` used to sit in the `ENTRYPOINT` array, where nothing outside the image could
+change it: `JAVA_TOOL_OPTIONS` is *prepended* to the command line, so a value set in compose lost to
+the one baked here. It is now `ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=60"` with the flag out of
+the entrypoint, so a deployment can lower it per environment without a rebuild. `Migrate` is started
+with `-cp … Migrate` rather than through the entrypoint, and an environment variable reaches it too.
+
+The default moved from 75 to 60 on 2026-11-01. 75% of a container limit is a figure for a machine,
+not a container: metaspace, the code cache, thread stacks and direct buffers live outside the heap
+and do not shrink when the heap cap does. Measured that day in production, this service held
+**277 MiB resident** against a 480 MiB heap cap on a 640 MiB limit — the cap was never the binding
+constraint, the margin was.
+
+The matching trap is lowering `mem_limit` instead: the heap cap scales down with the limit while
+non-heap does not, so the margin narrows and an OOM kill becomes *more* likely. Tune the percentage,
+not the limit. Infrastructure's side of this is `kinetix-infrastructure/docs/KUBERNETES.md` §4.
