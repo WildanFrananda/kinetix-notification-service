@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM eclipse-temurin:21-jdk@sha256:23cc5734ff46e776f51ce66eb9ee08444fd47caabec0a95b7eb6e94be2d3696d AS build
+FROM eclipse-temurin:21-jdk@sha256:db5cc6341a1d7bc40cdb51e1f0d9824f3bb2cc8107d29da421dc4df7d11f05f1 AS build
 
 ARG SBT_VERSION=1.10.7
 
@@ -40,7 +40,7 @@ RUN sbt -batch assembly \
  && jar xf /build/target/scala-3.3.4/kinetix-notification-service.jar META-INF/MANIFEST.MF \
  && grep -q '^Main-Class: com.kinetix.notification.Main' META-INF/MANIFEST.MF
 
-FROM eclipse-temurin:21-jre@sha256:227118764cccd3c3294617061aaa93a08309c63a395eefa83e6b35032992ea99 AS runtime
+FROM eclipse-temurin:21-jre@sha256:ca73b4d3961703d6d7830a4361f49ef0478f8f28b39defc07bb72f4cc7f834f6 AS runtime
 
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
